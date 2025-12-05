@@ -1,0 +1,80 @@
+# =========================================
+# V2God Caddyfile - NaiveProxy + AnyTLS 配置
+# 版本: 2.0.0
+# 更新: 2025-12-05
+# =========================================
+# 
+# 此配置用于 NaiveProxy 单独部署或与 AnyTLS 配合使用
+# 如需 443 端口共享（L4 分流），请使用 Caddyfile.l4.example
+#
+# 架构说明：
+#   - Caddy 443 端口: NaiveProxy (HTTP/2 CONNECT)
+#   - sing-box 8443 端口: AnyTLS (独立端口)
+# =========================================
+
+{
+	# 生产环境建议关闭 debug
+	# debug
+	
+	email admin@{{DOMAIN}}
+	
+	# =========================================
+	# 多 ACME CA 支持 - 随机选择以分散请求限制
+	# =========================================
+	# 可选值: letsencrypt, zerossl, buypass
+	# 使用方法: 在部署脚本中设置 FORCE_ACME_CA 变量
+	# 
+	# 各 CA 的速率限制参考:
+	#   Let's Encrypt:  50 证书/域名/周, 5 重复证书/周
+	#   ZeroSSL:        无限制（需要 EAB）
+	#   Buypass:        20 证书/域名/周
+	#   Google Trust:   无限制（需要 EAB）
+	#
+	# 注意: ZeroSSL 和 Google Trust Services 需要 EAB 凭据
+	# 如果遇到限制，可以切换不同的 CA
+	# =========================================
+	
+	# 使用 Cloudflare DNS-01 验证申请泛域名证书
+	acme_dns cloudflare {{CLOUDFLARE_API_TOKEN}}
+	
+	# ACME CA 配置（由部署脚本替换）
+	# 默认使用 Let's Encrypt
+	{{ACME_CA_CONFIG}}
+}
+
+# =========================================
+# Caddy HTTPS 服务 - NaiveProxy
+# =========================================
+# 监听泛域名 *.{{DOMAIN}}
+# 使用 DNS-01 验证自动申请泛域名证书
+# =========================================
+
+*.{{DOMAIN}} {
+	# TLS 配置 - 确保使用泛域名证书
+	tls {
+		dns cloudflare {{CLOUDFLARE_API_TOKEN}}
+	}
+	
+	route {
+		# NaiveProxy 配置
+		forward_proxy {
+			basic_auth {{NAIVE_USER}} {{NAIVE_PASSWD}}
+			hide_ip
+			hide_via
+			probe_resistance
+		}
+		
+		# 伪装站点：Amazon
+		reverse_proxy https://www.amazon.com {
+			header_up Host {upstream_hostport}
+		}
+	}
+	
+	# 访问日志
+	log {
+		output file /var/log/caddy/access.log {
+			roll_size 10mb
+			roll_keep 5
+		}
+	}
+}

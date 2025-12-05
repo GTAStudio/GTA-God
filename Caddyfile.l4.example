@@ -1,0 +1,138 @@
+# =========================================
+# V2God Caddyfile - Layer4 SNI 分流配置
+# 版本: 2.2.1
+# 更新: 2025-12-05
+# =========================================
+#
+# 此配置实现多协议分离部署：
+#   - NaiveProxy: 独立端口 8443 (直接 HTTPS，性能最优)
+#   - AnyTLS: 443 端口 L4 分流 (透传到 sing-box :8445)
+#   - AnyReality: 443 端口 L4 分流 (透传到 sing-box :8444)
+#
+# 重要: 三处 SNI 必须完全一致！
+#   1. Caddyfile 中的 @anyreality tls sni
+#   2. sing-box 配置中的 server_name
+#   3. 客户端配置中的 SNI
+#
+# 架构图：
+# ┌───────────────────────────────────────────────────────────────────────────┐
+# │                                                                           │
+# │  ┌─────────────────────────────────────┐    ┌───────────────────────────┐ │
+# │  │        Caddy Layer4 (:443)          │    │   Caddy HTTPS (:8443)     │ │
+# │  │                                     │    │                           │ │
+# │  │  ┌─────────────┐  ┌───────────────┐ │    │   NaiveProxy (直接HTTPS)  │ │
+# │  │  │ ANYTLS_SNI │  │ ANYREALITY_SNI│ │    │   伪装: 微软更新目录       │ │
+# │  │  │ (你的子域名)│  │ (amazon.com)  │ │    │   强制 TLS 1.3            │ │
+# │  │  └──────┬──────┘  └───────┬───────┘ │    └───────────────────────────┘ │
+# │  │         │ (透传)          │ (透传)   │                                  │
+# │  └─────────┼─────────────────┼─────────┘                                  │
+# │            ▼                 ▼                                            │
+# │     ┌──────────────┐  ┌──────────────┐                                    │
+# │     │  sing-box    │  │  sing-box    │                                    │
+# │     │  AnyTLS      │  │  AnyReality  │                                    │
+# │     │  :8445       │  │  :8444       │                                    │
+# │     └──────────────┘  └──────────────┘                                    │
+# └───────────────────────────────────────────────────────────────────────────┘
+#
+# =========================================
+
+{
+	# 生产环境建议关闭 debug
+	# debug
+	
+	email admin@{{DOMAIN}}
+	
+	# 使 forward_proxy 优先处理，确保在非 443 端口也能正常工作
+	order forward_proxy first
+	
+	# 使用 Cloudflare DNS-01 验证申请泛域名证书
+	acme_dns cloudflare {{CLOUDFLARE_API_TOKEN}}
+	
+	# ACME CA 配置（由部署脚本替换）
+	{{ACME_CA_CONFIG}}
+	
+	# =========================================
+	# Layer4 应用配置 - SNI 分流 (仅 AnyTLS + AnyReality)
+	# =========================================
+	layer4 {
+		# 监听 443 端口，根据 TLS SNI 分流
+		:443 {
+			@anytls tls sni {{ANYTLS_SNI}}
+			@anyreality tls sni {{ANYREALITY_SNI}}
+			
+			# AnyTLS 流量 - 透传到 sing-box 8445 端口
+			route @anytls {
+				proxy {
+					upstream localhost:8445
+				}
+			}
+			
+			# AnyReality 流量 - 透传到 sing-box 8444 端口
+			route @anyreality {
+				proxy {
+					upstream localhost:8444
+				}
+			}
+			
+			# 默认路由 - 未匹配的 443 端口流量伪装为 Amazon
+			route {
+				proxy {
+					upstream www.amazon.com:443
+				}
+			}
+		}
+	}
+}
+
+# =========================================
+# HTTPS 服务 - NaiveProxy 独立端口 (8443)
+# =========================================
+# 直接 HTTPS 对外，不经过 Layer4，性能最优
+# 强制 TLS 1.3，伪装为微软更新目录
+# =========================================
+
+*.{{DOMAIN}}:8443 {
+	tls {
+		dns cloudflare {{CLOUDFLARE_API_TOKEN}}
+		protocols tls1.3 tls1.3
+		curves x25519
+	}
+	
+	# NaiveProxy 配置 - 必须作为顶级指令
+	forward_proxy {
+		basic_auth {{NAIVE_USER}} {{NAIVE_PASSWD}}
+		hide_ip
+		hide_via
+		probe_resistance
+	}
+	
+	# 伪装站点：微软更新目录
+	reverse_proxy https://www.catalog.update.microsoft.com {
+		header_up Host {upstream_hostport}
+	}
+	
+	# 访问日志
+	log {
+		output file /var/log/caddy/naive-8443.log {
+			roll_size 10mb
+			roll_keep 5
+		}
+	}
+}
+
+# =========================================
+# HTTPS 服务 - 证书管理 (申请泛域名证书)
+# =========================================
+# 此站点用于触发 Caddy 申请泛域名证书 *.domain.com
+# 证书供 AnyTLS 使用
+# =========================================
+
+*.{{DOMAIN}} {
+	tls {
+		dns cloudflare {{CLOUDFLARE_API_TOKEN}}
+		protocols tls1.3 tls1.3
+		curves x25519
+	}
+	
+	respond "V2God Certificate Manager" 200
+}
