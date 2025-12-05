@@ -64,8 +64,10 @@
 			probe_resistance
 		}
 		
-		# 伪装站点：返回简单响应（避免反代外部站点超时）
-		respond "Service Unavailable" 503
+		# 伪装站点：Amazon
+		reverse_proxy https://www.amazon.com {
+			header_up Host {upstream_hostport}
+		}
 	}
 	
 	# 访问日志
