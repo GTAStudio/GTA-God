@@ -1,7 +1,8 @@
 {
   "log": {
     "level": "info",
-    "timestamp": true
+    "timestamp": true,
+    "output": "/var/log/sing-box/sing-box.log"
   },
   "inbounds": [
     {
