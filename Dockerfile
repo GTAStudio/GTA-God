@@ -96,5 +96,5 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=3 \
     CMD pgrep caddy >/dev/null 2>&1 || exit 1
 
-# 启动命令 - 同时运行 Caddy 和 sing-box（以 root 运行）
+# 启动命令
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
