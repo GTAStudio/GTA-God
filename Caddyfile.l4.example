@@ -1,21 +1,26 @@
 # =========================================
 # V2God Caddyfile - Layer4 SNI 分流配置
-# 版本: 2.0.0
+# 版本: 2.1.0
 # 更新: 2025-12-05
 # =========================================
 #
 # 此配置使用 Caddy Layer4 实现 443 端口共享：
 #   - NaiveProxy: *.{{DOMAIN}} (TLS 终止后 HTTP 处理)
-#   - AnyTLS: graph.microsoft.com (透传到 sing-box :8443)
-#   - AnyReality: security.microsoft.com (透传到 sing-box :8444)
+#   - AnyTLS: {{ANYTLS_SNI}} (透传到 sing-box :8443)
+#   - AnyReality: {{ANYREALITY_SNI}} (透传到 sing-box :8444)
+#
+# 重要: 三处 SNI 必须完全一致！
+#   1. Caddyfile 中的 @anyreality tls sni
+#   2. sing-box 配置中的 server_name
+#   3. 客户端配置中的 SNI
 #
 # 架构图：
 # ┌─────────────────────────────────────────────────────────────┐
 # │                    Caddy Layer4 (:443)                      │
 # │                                                             │
 # │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────┐ │
-# │  │ graph.microsoft │  │security.microsoft│  │ *.domain   │ │
-# │  │     .com        │  │      .com        │  │            │ │
+# │  │  ANYTLS_SNI    │  │ ANYREALITY_SNI  │  │ *.domain   │ │
+# │  │  (你的子域名)   │  │ (微软服务域名)   │  │            │ │
 # │  └────────┬────────┘  └────────┬─────────┘  └──────┬─────┘ │
 # │           │ (透传)             │ (透传)            │ (终止) │
 # └───────────┼────────────────────┼───────────────────┼───────┘

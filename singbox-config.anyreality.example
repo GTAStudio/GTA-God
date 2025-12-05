@@ -1,13 +1,11 @@
 {
   "log": {
     "level": "info",
-    "timestamp": true,
-    "output": "/var/log/sing-box/sing-box.log"
+    "timestamp": true
   },
   "inbounds": [
     {
       "type": "anytls",
-      "tag": "anyreality-in",
       "listen": "::",
       "listen_port": {{ANYREALITY_PORT}},
       "users": [
@@ -41,14 +39,5 @@
         }
       }
     }
-  ],
-  "outbounds": [
-    {
-      "type": "direct",
-      "tag": "direct"
-    }
-  ],
-  "route": {
-    "final": "direct"
-  }
+  ]
 }

@@ -47,8 +47,8 @@ ANYTLS_PORT="8443"
 # ANYTLS_USER="your_anytls_user"
 # ANYTLS_PASSWORD="your_anytls_password"
 
-# AnyTLS SNI 域名 (必须是你自己域名的子域名，因为需要证书)
-# 注意: AnyTLS 使用真实证书，必须用你有证书的域名
+# AnyTLS SNI 域名 (建议使用你自己域名的子域名，会用泛域名证书)
+# 注意: AnyTLS 使用真实证书验证，SNI 必须与证书匹配
 ANYTLS_SNI="api.example.com"
 
 # =========================================
@@ -63,10 +63,11 @@ ANYREALITY_PORT="8444"
 # ANYREALITY_PASSWORD="your_anyreality_password"
 
 # AnyReality SNI 域名 (可以是任意域名，Reality 不需要真实证书)
-ANYREALITY_SNI="security.microsoft.com"
+# 注意: 此 SNI 必须与 ANYREALITY_TARGET 保持一致！
+ANYREALITY_SNI="www.amazon.com"
 
-# Reality 伪装目标服务器
-ANYREALITY_TARGET="www.catalog.update.microsoft.com"
+# Reality 伪装目标服务器 (必须与 ANYREALITY_SNI 一致)
+ANYREALITY_TARGET="www.amazon.com"
 
 # =========================================
 # Reality 密钥对
