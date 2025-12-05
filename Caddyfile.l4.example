@@ -81,10 +81,15 @@
 				}
 			}
 			
-			# 默认路由 - 未匹配的流量透传到 AnyReality（避免 TLS 证书错误）
+			# 默认路由 - 未匹配的流量走 NaiveProxy（TLS 终止）
 			route {
+				tls {
+					connection_policy {
+						alpn h2 http/1.1
+					}
+				}
 				proxy {
-					upstream localhost:8444
+					upstream localhost:8080
 				}
 			}
 		}
