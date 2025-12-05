@@ -47,8 +47,9 @@ ANYTLS_PORT="8443"
 # ANYTLS_USER="your_anytls_user"
 # ANYTLS_PASSWORD="your_anytls_password"
 
-# AnyTLS SNI 域名 (伪装成的域名)
-ANYTLS_SNI="graph.microsoft.com"
+# AnyTLS SNI 域名 (必须是你自己域名的子域名，因为需要证书)
+# 注意: AnyTLS 使用真实证书，必须用你有证书的域名
+ANYTLS_SNI="api.example.com"
 
 # =========================================
 # AnyReality 配置 (模式 anyreality/l4 时使用)
@@ -61,7 +62,7 @@ ANYREALITY_PORT="8444"
 # ANYREALITY_USER="your_anyreality_user"
 # ANYREALITY_PASSWORD="your_anyreality_password"
 
-# AnyReality SNI 域名 (伪装成的域名)
+# AnyReality SNI 域名 (可以是任意域名，Reality 不需要真实证书)
 ANYREALITY_SNI="security.microsoft.com"
 
 # Reality 伪装目标服务器

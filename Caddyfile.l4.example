@@ -46,8 +46,8 @@
 	layer4 {
 		# 监听 443 端口，根据 TLS SNI 分流
 		:443 {
-			@anytls tls sni graph.microsoft.com
-			@anyreality tls sni security.microsoft.com
+			@anytls tls sni {{ANYTLS_SNI}}
+			@anyreality tls sni {{ANYREALITY_SNI}}
 			@naive tls sni *.{{DOMAIN}}
 			
 			# AnyTLS 流量 - 透传到 sing-box 8443 端口
