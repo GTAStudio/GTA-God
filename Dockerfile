@@ -50,11 +50,14 @@ RUN xcaddy build ${CADDY_VERSION} \
 
 # 下载 sing-box 1.13+ (支持 naive inbound)
 # 使用 GitHub API 获取最新 1.13.x 版本
+# 使用 TARGETARCH 支持 buildx 多架构构建
+ARG TARGETARCH
 RUN set -ex && \
-    ARCH=$(uname -m) && \
-    case "$ARCH" in \
-        x86_64) ARCH="amd64" ;; \
-        aarch64) ARCH="arm64" ;; \
+    case "$TARGETARCH" in \
+        amd64) ARCH="amd64" ;; \
+        arm64) ARCH="arm64" ;; \
+        arm) ARCH="armv7" ;; \
+        *) echo "Unsupported arch: $TARGETARCH"; exit 1 ;; \
     esac && \
     echo "==> Fetching sing-box releases for ${ARCH}..." && \
     # 获取所有 releases，找到 1.13.x 版本
