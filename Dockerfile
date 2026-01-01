@@ -50,6 +50,7 @@ RUN xcaddy build ${CADDY_VERSION} \
 
 # 下载 sing-box 1.13+ (支持 naive inbound)
 # 使用 TARGETARCH 支持 buildx 多架构构建
+# Alpine 使用 musl libc，必须下载 musl 版本
 ARG TARGETARCH
 ARG SINGBOX_VERSION=1.13.0-alpha.35
 RUN set -ex && \
@@ -57,8 +58,8 @@ RUN set -ex && \
     if [ "$TARGETARCH" = "amd64" ]; then ARCH="amd64"; \
     elif [ "$TARGETARCH" = "arm64" ]; then ARCH="arm64"; \
     else echo "Unsupported arch: $TARGETARCH"; exit 1; fi && \
-    echo "==> Downloading sing-box v${SINGBOX_VERSION} for ${ARCH}..." && \
-    wget -O /tmp/sing-box.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-${ARCH}.tar.gz" && \
+    echo "==> Downloading sing-box v${SINGBOX_VERSION} for ${ARCH} (musl)..." && \
+    wget -O /tmp/sing-box.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-${ARCH}-musl.tar.gz" && \
     tar -xzf /tmp/sing-box.tar.gz -C /tmp && \
     cp /tmp/sing-box-*/sing-box /usr/bin/sing-box && \
     chmod +x /usr/bin/sing-box && \
