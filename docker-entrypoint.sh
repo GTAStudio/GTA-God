@@ -39,14 +39,13 @@ fi
 
 echo "📝 Caddyfile found, validating..."
 
-# 验证 Caddyfile 格式（忽略 validate 后的正常关闭日志）
-caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile 2>&1 | grep -v "shutting down" | grep -v "stopped background"
-VALIDATE_RESULT=${PIPESTATUS[0]}
-if [ $VALIDATE_RESULT -ne 0 ]; then
+# 验证 Caddyfile 格式
+if caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile 2>&1 | grep -q "Valid configuration"; then
+    echo "✅ Caddyfile validation passed"
+else
     echo "❌ ERROR: Caddyfile validation failed!"
     exit 1
 fi
-echo "✅ Caddyfile validation passed"
 
 # =========================================
 # 检查 sing-box 配置
