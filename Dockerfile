@@ -49,9 +49,9 @@ RUN xcaddy build ${CADDY_VERSION} \
     --output /usr/bin/caddy
 
 # 下载 sing-box 1.13+ (支持 naive inbound)
-# 优先获取 1.13.x alpha/beta，因为 native naive 只在 1.13+ 可用
 # 使用 TARGETARCH 支持 buildx 多架构构建
 ARG TARGETARCH
+ARG SINGBOX_VERSION=1.13.0-alpha.35
 RUN set -ex && \
     case "$TARGETARCH" in \
         amd64) ARCH="amd64" ;; \
@@ -59,20 +59,11 @@ RUN set -ex && \
         arm) ARCH="armv7" ;; \
         *) echo "Unsupported arch: $TARGETARCH"; exit 1 ;; \
     esac && \
-    echo "==> Fetching sing-box 1.13.x releases for ${ARCH}..." && \
-    # 使用 jq 解析 JSON，更可靠
-    apk add --no-cache jq && \
-    SINGBOX_VERSION=$(wget -qO- "https://api.github.com/repos/SagerNet/sing-box/releases?per_page=100" | \
-        jq -r '[.[] | select(.tag_name | startswith("v1.13"))][0].tag_name' | sed 's/^v//') && \
-    if [ -z "$SINGBOX_VERSION" ] || [ "$SINGBOX_VERSION" = "null" ]; then \
-        echo "ERROR: Could not find sing-box 1.13.x release"; exit 1; \
-    fi && \
-    echo "==> Downloading sing-box v${SINGBOX_VERSION}..." && \
+    echo "==> Downloading sing-box v${SINGBOX_VERSION} for ${ARCH}..." && \
     wget -O /tmp/sing-box.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-${ARCH}.tar.gz" && \
     tar -xzf /tmp/sing-box.tar.gz -C /tmp && \
     cp /tmp/sing-box-*/sing-box /usr/bin/sing-box && \
     chmod +x /usr/bin/sing-box && \
-    echo "==> sing-box installed:" && \
     /usr/bin/sing-box version && \
     rm -rf /tmp/sing-box*
 
