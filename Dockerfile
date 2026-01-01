@@ -49,25 +49,28 @@ RUN xcaddy build ${CADDY_VERSION} \
     --output /usr/bin/caddy
 
 # 下载 sing-box 1.13+ (支持 naive inbound)
-# 优先使用稳定版 1.13.x，如果不存在则使用最新 alpha
-RUN ARCH=$(uname -m) && \
-    if [ "$ARCH" = "x86_64" ]; then ARCH="amd64"; elif [ "$ARCH" = "aarch64" ]; then ARCH="arm64"; fi && \
-    echo "Downloading sing-box 1.13+ for ${ARCH}..." && \
-    # 尝试获取 1.13.x 稳定版
-    STABLE_VERSION=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases | grep tag_name | grep -E '"v1\.13\.[0-9]+"' | head -1 | cut -d '"' -f 4 | sed 's/^v//') && \
-    if [ -z "$STABLE_VERSION" ]; then \
-        # 如果没有稳定版，使用最新 alpha
-        SINGBOX_VERSION=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases | grep tag_name | grep -E '"v1\.13\.' | head -1 | cut -d '"' -f 4 | sed 's/^v//') && \
-        echo "Using alpha version: ${SINGBOX_VERSION}"; \
-    else \
-        SINGBOX_VERSION="$STABLE_VERSION" && \
-        echo "Using stable version: ${SINGBOX_VERSION}"; \
+# 使用 GitHub API 获取最新 1.13.x 版本
+RUN set -ex && \
+    ARCH=$(uname -m) && \
+    case "$ARCH" in \
+        x86_64) ARCH="amd64" ;; \
+        aarch64) ARCH="arm64" ;; \
+    esac && \
+    echo "==> Fetching sing-box releases for ${ARCH}..." && \
+    # 获取所有 releases，找到 1.13.x 版本
+    RELEASES=$(wget -qO- https://api.github.com/repos/SagerNet/sing-box/releases) && \
+    # 优先找稳定版 1.13.x (不含 alpha/beta/rc)
+    SINGBOX_VERSION=$(echo "$RELEASES" | grep -o '"tag_name": *"v1\.13\.[0-9]*"' | head -1 | grep -o '1\.13\.[0-9]*') && \
+    # 如果没有稳定版，找任意 1.13.x (包括 alpha)
+    if [ -z "$SINGBOX_VERSION" ]; then \
+        SINGBOX_VERSION=$(echo "$RELEASES" | grep -o '"tag_name": *"v1\.13\.[^"]*"' | head -1 | sed 's/.*"v\(1\.13\.[^"]*\)".*/\1/'); \
     fi && \
-    curl -Lo /tmp/sing-box.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-${ARCH}.tar.gz" && \
+    echo "==> Downloading sing-box v${SINGBOX_VERSION}..." && \
+    wget -O /tmp/sing-box.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-${ARCH}.tar.gz" && \
     tar -xzf /tmp/sing-box.tar.gz -C /tmp && \
-    find /tmp -name "sing-box" -type f -executable && \
-    cp $(find /tmp -name "sing-box" -type f -executable | head -1) /usr/bin/sing-box && \
+    cp /tmp/sing-box-*/sing-box /usr/bin/sing-box && \
     chmod +x /usr/bin/sing-box && \
+    echo "==> sing-box installed:" && \
     /usr/bin/sing-box version && \
     rm -rf /tmp/sing-box*
 
