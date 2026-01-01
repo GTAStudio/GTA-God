@@ -53,12 +53,10 @@ RUN xcaddy build ${CADDY_VERSION} \
 ARG TARGETARCH
 ARG SINGBOX_VERSION=1.13.0-alpha.35
 RUN set -ex && \
-    case "$TARGETARCH" in \
-        amd64) ARCH="amd64" ;; \
-        arm64) ARCH="arm64" ;; \
-        arm) ARCH="armv7" ;; \
-        *) echo "Unsupported arch: $TARGETARCH"; exit 1 ;; \
-    esac && \
+    echo "==> TARGETARCH=${TARGETARCH}" && \
+    if [ "$TARGETARCH" = "amd64" ]; then ARCH="amd64"; \
+    elif [ "$TARGETARCH" = "arm64" ]; then ARCH="arm64"; \
+    else echo "Unsupported arch: $TARGETARCH"; exit 1; fi && \
     echo "==> Downloading sing-box v${SINGBOX_VERSION} for ${ARCH}..." && \
     wget -O /tmp/sing-box.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-${ARCH}.tar.gz" && \
     tar -xzf /tmp/sing-box.tar.gz -C /tmp && \
