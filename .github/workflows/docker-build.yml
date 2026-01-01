@@ -74,6 +74,7 @@ jobs:
           docker pull ${{ secrets.DOCKERHUB_USERNAME }}/v2god:latest
           # 直接测试二进制文件，不启动完整容器（避免需要 Caddyfile）
           docker run --rm --entrypoint caddy ${{ secrets.DOCKERHUB_USERNAME }}/v2god:latest version
-          docker run --rm --entrypoint caddy ${{ secrets.DOCKERHUB_USERNAME }}/v2god:latest list-modules | grep forward_proxy
+          # v4.1.0: 验证 layer4 和 cloudflare 模块（不再需要 forwardproxy）
+          docker run --rm --entrypoint caddy ${{ secrets.DOCKERHUB_USERNAME }}/v2god:latest list-modules | grep -E "(layer4|cloudflare)"
           docker run --rm --entrypoint sing-box ${{ secrets.DOCKERHUB_USERNAME }}/v2god:latest version
           echo "✅ Image verification passed!"
