@@ -1,9 +1,10 @@
 #!/bin/sh
-set -e
+# 不使用 set -e，手动处理错误
+# set -e 会导致任何非零返回值立即退出，不适合长时间运行的服务
 
 # =========================================
 # V2God Docker Entrypoint
-# 版本: 4.0.0
+# 版本: 4.1.0
 # 更新: 2026-01-01
 # =========================================
 # 
@@ -19,7 +20,7 @@ set -e
 #
 # =========================================
 
-VERSION="4.0.0"
+VERSION="4.1.0"
 
 echo "========================================="
 echo "V2God Container v${VERSION}"
@@ -38,8 +39,10 @@ fi
 
 echo "📝 Caddyfile found, validating..."
 
-# 验证 Caddyfile 格式
-if ! caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile; then
+# 验证 Caddyfile 格式（忽略 validate 后的正常关闭日志）
+caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile 2>&1 | grep -v "shutting down" | grep -v "stopped background"
+VALIDATE_RESULT=${PIPESTATUS[0]}
+if [ $VALIDATE_RESULT -ne 0 ]; then
     echo "❌ ERROR: Caddyfile validation failed!"
     exit 1
 fi
