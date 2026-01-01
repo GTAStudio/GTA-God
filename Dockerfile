@@ -60,10 +60,11 @@ RUN set -ex && \
         *) echo "Unsupported arch: $TARGETARCH"; exit 1 ;; \
     esac && \
     echo "==> Fetching sing-box 1.13.x releases for ${ARCH}..." && \
-    # 获取所有 releases，找 1.13.x 版本 (包括 alpha)
-    SINGBOX_VERSION=$(wget -qO- "https://api.github.com/repos/SagerNet/sing-box/releases?per_page=50" | \
-        grep -o '"tag_name": *"v1\.13\.[^"]*"' | head -1 | sed 's/.*"v\([^"]*\)".*/\1/') && \
-    if [ -z "$SINGBOX_VERSION" ]; then \
+    # 使用 jq 解析 JSON，更可靠
+    apk add --no-cache jq && \
+    SINGBOX_VERSION=$(wget -qO- "https://api.github.com/repos/SagerNet/sing-box/releases?per_page=100" | \
+        jq -r '[.[] | select(.tag_name | startswith("v1.13"))][0].tag_name' | sed 's/^v//') && \
+    if [ -z "$SINGBOX_VERSION" ] || [ "$SINGBOX_VERSION" = "null" ]; then \
         echo "ERROR: Could not find sing-box 1.13.x release"; exit 1; \
     fi && \
     echo "==> Downloading sing-box v${SINGBOX_VERSION}..." && \
