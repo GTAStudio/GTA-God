@@ -48,8 +48,8 @@ RUN xcaddy build ${CADDY_VERSION} \
     --with github.com/mholt/caddy-l4 \
     --output /usr/bin/caddy
 
-# 下载 sing-box (支持 naive inbound 需要 1.13+)
-# 自动获取最新版本：优先 1.13.x，否则使用最新 release
+# 下载 sing-box 1.13+ (支持 naive inbound)
+# 优先获取 1.13.x alpha/beta，因为 native naive 只在 1.13+ 可用
 # 使用 TARGETARCH 支持 buildx 多架构构建
 ARG TARGETARCH
 RUN set -ex && \
@@ -59,11 +59,12 @@ RUN set -ex && \
         arm) ARCH="armv7" ;; \
         *) echo "Unsupported arch: $TARGETARCH"; exit 1 ;; \
     esac && \
-    echo "==> Fetching sing-box releases for ${ARCH}..." && \
-    # 获取最新 release 的 tag
-    SINGBOX_VERSION=$(wget -qO- https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep -o '"tag_name": *"[^"]*"' | head -1 | sed 's/.*"v\([^"]*\)".*/\1/') && \
+    echo "==> Fetching sing-box 1.13.x releases for ${ARCH}..." && \
+    # 获取所有 releases，找 1.13.x 版本 (包括 alpha)
+    SINGBOX_VERSION=$(wget -qO- "https://api.github.com/repos/SagerNet/sing-box/releases?per_page=50" | \
+        grep -o '"tag_name": *"v1\.13\.[^"]*"' | head -1 | sed 's/.*"v\([^"]*\)".*/\1/') && \
     if [ -z "$SINGBOX_VERSION" ]; then \
-        echo "ERROR: Could not fetch sing-box version"; exit 1; \
+        echo "ERROR: Could not find sing-box 1.13.x release"; exit 1; \
     fi && \
     echo "==> Downloading sing-box v${SINGBOX_VERSION}..." && \
     wget -O /tmp/sing-box.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-${ARCH}.tar.gz" && \
