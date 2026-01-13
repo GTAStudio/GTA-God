@@ -1,5 +1,5 @@
 # =========================================
-# V2God Dockerfile - sing-box 1.13+ 统一架构
+# GTAGod Dockerfile - sing-box 1.13+ 统一架构
 # 版本: 4.1.0
 # 更新: 2026-01-01
 # =========================================
@@ -52,7 +52,7 @@ RUN xcaddy build ${CADDY_VERSION} \
 # 使用 TARGETARCH 支持 buildx 多架构构建
 # Alpine 使用 musl libc，必须下载 musl 版本
 ARG TARGETARCH
-ARG SINGBOX_VERSION=1.13.0-alpha.36
+ARG SINGBOX_VERSION=1.13.0-beta.5
 RUN set -ex && \
     echo "==> TARGETARCH=${TARGETARCH}" && \
     if [ "$TARGETARCH" = "amd64" ]; then ARCH="amd64"; \
@@ -71,8 +71,8 @@ RUN set -ex && \
 FROM alpine:3.23
 
 # 元数据
-LABEL maintainer="v2god" \
-      description="V2God - sing-box 1.13+ (naive + anytls + anyreality) with Caddy L4" \
+LABEL maintainer="gtagod" \
+      description="GTAGod - sing-box 1.13+ (naive + anytls + anyreality) with Caddy L4" \
       version="4.1"
 
 # 一次性安装所有依赖并创建目录，减少镜像层

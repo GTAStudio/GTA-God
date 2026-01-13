@@ -3,7 +3,7 @@
 # set -e 会导致任何非零返回值立即退出，不适合长时间运行的服务
 
 # =========================================
-# V2God Docker Entrypoint
+# GTAGod Docker Entrypoint
 # 版本: 4.1.0
 # 更新: 2026-01-01
 # =========================================
@@ -23,7 +23,7 @@
 VERSION="4.1.0"
 
 echo "========================================="
-echo "V2God Container v${VERSION}"
+echo "GTAGod Container v${VERSION}"
 echo "sing-box 1.13+ unified architecture"
 echo "Starting Caddy + sing-box services..."
 echo "========================================="
@@ -206,8 +206,8 @@ if [ "$NEEDS_CERT" = "true" ]; then
             echo "💡 AnyReality only mode, continuing without certificate..."
         else
             echo "❌ sing-box cannot start without certificate"
-            echo "💡 Check: docker exec v2god ls -la /data/caddy/certificates/"
-            echo "💡 Restart container later: docker restart v2god"
+            echo "💡 Check: docker exec gtagod ls -la /data/caddy/certificates/"
+            echo "💡 Restart container later: docker restart gtagod"
         fi
     fi
 fi
@@ -218,8 +218,10 @@ fi
 echo ""
 echo "🚀 Starting sing-box..."
 
+# 直接输出到 stdout/stderr，这样 docker logs 可以看到
+# 同时使用 tee 保存到文件以便查看历史
 mkdir -p /var/log/sing-box
-sing-box run -c /tmp/sing-box-config.json > /var/log/sing-box/sing-box.log 2>&1 &
+sing-box run -c /tmp/sing-box-config.json 2>&1 | tee /var/log/sing-box/sing-box.log &
 SINGBOX_PID=$!
 echo "✅ sing-box started with PID: $SINGBOX_PID"
 
@@ -246,7 +248,7 @@ fi
 
 echo ""
 echo "========================================="
-echo "✅ V2God Container v${VERSION} initialized"
+echo "✅ GTAGod Container v${VERSION} initialized"
 echo "📊 Caddy PID: $CADDY_PID"
 if [ -n "$SINGBOX_PID" ] && kill -0 $SINGBOX_PID 2>/dev/null; then
     echo "📊 sing-box PID: $SINGBOX_PID"

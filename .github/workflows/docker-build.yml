@@ -1,4 +1,4 @@
-name: Build and Deploy V2God
+name: Build and Deploy GTAGod
 
 on:
   # push:
@@ -14,9 +14,9 @@ on:
         required: false
         default: 'latest'
       singbox_version:
-        description: 'sing-box version (e.g. 1.13.0-alpha.35)'
+        description: 'sing-box version (e.g. 1.13.0-beta.5)'
         required: false
-        default: '1.13.0-alpha.35'
+        default: '1.13.0-beta.5'
       force_rebuild:
         description: 'Force rebuild (no cache)'
         required: false
@@ -24,7 +24,7 @@ on:
         default: false
 
 # =========================================
-# V2God v4.1.0 - sing-box 1.13+ 统一架构
+# GTAGod v4.1.0 - sing-box 1.13+ 统一架构
 # =========================================
 # 
 # sing-box 1.13+ 原生支持 naive inbound
@@ -59,7 +59,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ secrets.DOCKERHUB_USERNAME }}/v2god
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/gtagod
           tags: |
             type=raw,value=latest
             type=raw,value=v4.1.0
@@ -78,25 +78,25 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             CADDY_VERSION=${{ github.event.inputs.caddy_version || 'latest' }}
-            SINGBOX_VERSION=${{ github.event.inputs.singbox_version || '1.13.0-alpha.35' }}
+            SINGBOX_VERSION=${{ github.event.inputs.singbox_version || '1.13.0-beta.5' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
       
       - name: Verify image
         run: |
-          echo "🔍 Verifying V2God v4.1.0 image..."
-          docker pull ${{ secrets.DOCKERHUB_USERNAME }}/v2god:latest
+          echo "🔍 Verifying GTAGod v4.1.0 image..."
+          docker pull ${{ secrets.DOCKERHUB_USERNAME }}/gtagod:latest
           
           echo "📦 Checking Caddy..."
-          docker run --rm --entrypoint caddy ${{ secrets.DOCKERHUB_USERNAME }}/v2god:latest version
+          docker run --rm --entrypoint caddy ${{ secrets.DOCKERHUB_USERNAME }}/gtagod:latest version
           
           echo "📦 Checking Caddy modules (layer4 + cloudflare)..."
-          docker run --rm --entrypoint caddy ${{ secrets.DOCKERHUB_USERNAME }}/v2god:latest list-modules | grep -E "(layer4|cloudflare)"
+          docker run --rm --entrypoint caddy ${{ secrets.DOCKERHUB_USERNAME }}/gtagod:latest list-modules | grep -E "(layer4|cloudflare)"
           
           echo "📦 Checking sing-box 1.13+ (native naive inbound)..."
-          docker run --rm --entrypoint sing-box ${{ secrets.DOCKERHUB_USERNAME }}/v2god:latest version
+          docker run --rm --entrypoint sing-box ${{ secrets.DOCKERHUB_USERNAME }}/gtagod:latest version
           
-          echo "✅ V2God v4.1.0 image verification passed!"
+          echo "✅ GTAGod v4.1.0 image verification passed!"
           echo "   - Caddy with layer4 + cloudflare modules"
           echo "   - sing-box 1.13+ with native naive inbound"
           echo "   - No external forwardproxy needed!"
