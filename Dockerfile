@@ -30,7 +30,7 @@ FROM golang:1.25-alpine AS builder
 # Caddy 2.10.1+ 需要 Go 1.25+ 编译
 ARG CADDY_VERSION=latest
 ARG XCADDY_VERSION=v0.4.5
-ARG SINGBOX_VERSION=1.13
+ARG SINGBOX_VERSION=1.13.0-beta.8
 
 # 设置 GOTOOLCHAIN 允许自动下载更新的 Go 版本
 ENV GOTOOLCHAIN=auto
@@ -52,7 +52,7 @@ RUN xcaddy build ${CADDY_VERSION} \
 # 使用 TARGETARCH 支持 buildx 多架构构建
 # Alpine 使用 musl libc，必须下载 musl 版本
 ARG TARGETARCH
-ARG SINGBOX_VERSION=1.13.0-beta.5
+ARG SINGBOX_VERSION=1.13.0-beta.8
 RUN set -ex && \
     echo "==> TARGETARCH=${TARGETARCH}" && \
     if [ "$TARGETARCH" = "amd64" ]; then ARCH="amd64"; \
@@ -122,9 +122,9 @@ WORKDIR /config/caddy
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-# 健康检查 - 仅检查 Caddy 进程是否存活
+# 健康检查 - Caddy + sing-box + 证书就绪状态
 HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=3 \
-    CMD pgrep caddy >/dev/null 2>&1 || exit 1
+    CMD sh -c 'pgrep caddy >/dev/null 2>&1 || exit 1; CERT_PATH=$(jq -r "..|.certificate_path? // empty" /etc/sing-box/config.json | head -n1); if [ -n "$CERT_PATH" ]; then [ -f "$CERT_PATH" ] && [ -f "${CERT_PATH%.crt}.key" ] || exit 1; fi; pgrep sing-box >/dev/null 2>&1 || exit 1'
 
 # 启动命令
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

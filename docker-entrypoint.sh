@@ -101,6 +101,47 @@ echo "✅ Caddy started with PID: $CADDY_PID"
 # =========================================
 # 等待证书后启动 sing-box
 # =========================================
+CERT_WAIT_MAX="${CERT_WAIT_MAX:-180}"
+CERT_RETRY_INTERVAL="${CERT_RETRY_INTERVAL:-30}"
+CERT_RETRY_MAX="${CERT_RETRY_MAX:-0}"
+
+start_singbox() {
+    if pgrep -x sing-box >/dev/null 2>&1; then
+        return 0
+    fi
+
+    echo ""
+    echo "🚀 Starting sing-box..."
+
+    # 直接输出到 stdout/stderr，这样 docker logs 可以看到
+    # 同时使用 tee 保存到文件以便查看历史
+    mkdir -p /var/log/sing-box
+    sing-box run -c /tmp/sing-box-config.json 2>&1 | tee /var/log/sing-box/sing-box.log &
+    SINGBOX_PID=$!
+    echo "✅ sing-box started with PID: $SINGBOX_PID"
+
+    sleep 3
+    if kill -0 $SINGBOX_PID 2>/dev/null; then
+        echo "✅ sing-box is running successfully!"
+        
+        # 显示启用的功能
+        if [ "$HAS_NAIVE" = "true" ]; then
+            echo "   📦 NaiveProxy: enabled"
+        fi
+        if [ "$HAS_ANYTLS" = "true" ]; then
+            echo "   📦 AnyTLS: enabled"
+        fi
+        if [ "$HAS_ANYREALITY" = "true" ]; then
+            echo "   📦 AnyReality: enabled"
+        fi
+    else
+        echo "❌ sing-box failed to start! Logs:"
+        cat /var/log/sing-box/sing-box.log 2>/dev/null | tail -30 || echo "No log file"
+        echo ""
+        echo "⚠️  Continuing with Caddy only..."
+    fi
+}
+
 if [ "$NEEDS_CERT" = "true" ]; then
     echo ""
     echo "🔍 Waiting for SSL certificates..."
@@ -141,10 +182,17 @@ if [ "$NEEDS_CERT" = "true" ]; then
         
         return 1
     }
+
+    update_cert_paths() {
+        echo "🔧 Updating sing-box config with certificate paths..."
+        sed -i "s|\"certificate_path\"[[:space:]]*:[[:space:]]*\"[^\"]*\"|\"certificate_path\": \"${ACTUAL_CERT}\"|g" /tmp/sing-box-config.json
+        sed -i "s|\"key_path\"[[:space:]]*:[[:space:]]*\"[^\"]*\"|\"key_path\": \"${ACTUAL_KEY}\"|g" /tmp/sing-box-config.json
+        echo "✅ Certificate paths updated"
+    }
     
     # 等待证书
     WAIT_COUNT=0
-    MAX_WAIT=180
+    MAX_WAIT=${CERT_WAIT_MAX}
     CERT_FOUND=false
     
     # 首先检查是否已有证书
@@ -191,59 +239,42 @@ if [ "$NEEDS_CERT" = "true" ]; then
     done
     
     if [ "$CERT_FOUND" = "true" ]; then
-        echo "🔧 Updating sing-box config with certificate paths..."
-        
-        # 替换证书路径
-        sed -i "s|\"certificate_path\"[[:space:]]*:[[:space:]]*\"[^\"]*\"|\"certificate_path\": \"${ACTUAL_CERT}\"|g" /tmp/sing-box-config.json
-        sed -i "s|\"key_path\"[[:space:]]*:[[:space:]]*\"[^\"]*\"|\"key_path\": \"${ACTUAL_KEY}\"|g" /tmp/sing-box-config.json
-        
-        echo "✅ Certificate paths updated"
+        update_cert_paths
+        start_singbox
     else
         echo "⚠️  Timeout waiting for certificate after ${MAX_WAIT}s"
-        
-        # 如果只有 AnyReality（不需要证书），仍然可以启动
-        if [ "$HAS_ANYREALITY" = "true" ] && [ "$HAS_NAIVE" = "false" ] && [ "$HAS_ANYTLS" = "false" ]; then
-            echo "💡 AnyReality only mode, continuing without certificate..."
-        else
-            echo "❌ sing-box cannot start without certificate"
-            echo "💡 Check: docker exec gtagod ls -la /data/caddy/certificates/"
-            echo "💡 Restart container later: docker restart gtagod"
-        fi
-    fi
-fi
+        echo "🔁 Auto-retry is enabled (interval: ${CERT_RETRY_INTERVAL}s, max: ${CERT_RETRY_MAX})"
 
-# =========================================
-# 启动 sing-box
-# =========================================
-echo ""
-echo "🚀 Starting sing-box..."
+        RETRY_COUNT=0
+        while [ "$CERT_FOUND" = "false" ]; do
+            if [ "$CERT_RETRY_MAX" != "0" ] && [ $RETRY_COUNT -ge $CERT_RETRY_MAX ]; then
+                echo "❌ Reached max retry count (${CERT_RETRY_MAX}), sing-box will remain stopped"
+                break
+            fi
 
-# 直接输出到 stdout/stderr，这样 docker logs 可以看到
-# 同时使用 tee 保存到文件以便查看历史
-mkdir -p /var/log/sing-box
-sing-box run -c /tmp/sing-box-config.json 2>&1 | tee /var/log/sing-box/sing-box.log &
-SINGBOX_PID=$!
-echo "✅ sing-box started with PID: $SINGBOX_PID"
+            sleep "$CERT_RETRY_INTERVAL"
+            RETRY_COUNT=$((RETRY_COUNT + 1))
 
-sleep 3
-if kill -0 $SINGBOX_PID 2>/dev/null; then
-    echo "✅ sing-box is running successfully!"
-    
-    # 显示启用的功能
-    if [ "$HAS_NAIVE" = "true" ]; then
-        echo "   📦 NaiveProxy: enabled"
-    fi
-    if [ "$HAS_ANYTLS" = "true" ]; then
-        echo "   📦 AnyTLS: enabled"
-    fi
-    if [ "$HAS_ANYREALITY" = "true" ]; then
-        echo "   📦 AnyReality: enabled"
+            ACTUAL_CERT=$(find_certificate)
+            if [ -n "$ACTUAL_CERT" ] && [ -f "$ACTUAL_CERT" ]; then
+                ACTUAL_KEY="${ACTUAL_CERT%.crt}.key"
+                if [ -f "$ACTUAL_KEY" ]; then
+                    echo "✅ Found certificate on retry #${RETRY_COUNT}: $ACTUAL_CERT"
+                    echo "✅ Found key: $ACTUAL_KEY"
+                    CERT_FOUND=true
+                    update_cert_paths
+                    start_singbox
+                    break
+                fi
+            fi
+
+            if [ $((RETRY_COUNT % 5)) -eq 0 ]; then
+                echo "⏳ Still waiting for certificate... (retry #${RETRY_COUNT})"
+            fi
+        done
     fi
 else
-    echo "❌ sing-box failed to start! Logs:"
-    cat /var/log/sing-box/sing-box.log 2>/dev/null | tail -30 || echo "No log file"
-    echo ""
-    echo "⚠️  Continuing with Caddy only..."
+    start_singbox
 fi
 
 echo ""
