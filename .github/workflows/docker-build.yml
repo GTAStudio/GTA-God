@@ -14,9 +14,9 @@ on:
         required: false
         default: 'latest'
       singbox_version:
-        description: 'sing-box version (e.g. 1.13.0-beta.5)'
+        description: 'sing-box version (e.g. 1.13.0-rc.1)'
         required: false
-        default: '1.13.0-beta.5'
+        default: '1.13.0-rc.1'
       force_rebuild:
         description: 'Force rebuild (no cache)'
         required: false
@@ -78,7 +78,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             CADDY_VERSION=${{ github.event.inputs.caddy_version || 'latest' }}
-            SINGBOX_VERSION=${{ github.event.inputs.singbox_version || '1.13.0-beta.5' }}
+            SINGBOX_VERSION=${{ github.event.inputs.singbox_version || '1.13.0-rc.1' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
       

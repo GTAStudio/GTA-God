@@ -52,7 +52,7 @@ RUN xcaddy build ${CADDY_VERSION} \
 # 使用 TARGETARCH 支持 buildx 多架构构建
 # Alpine 使用 musl libc，必须下载 musl 版本
 ARG TARGETARCH
-ARG SINGBOX_VERSION=1.13.0-beta.8
+ARG SINGBOX_VERSION=1.13.0-rc.1
 RUN set -ex && \
     echo "==> TARGETARCH=${TARGETARCH}" && \
     if [ "$TARGETARCH" = "amd64" ]; then ARCH="amd64"; \
