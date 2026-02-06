@@ -24,8 +24,6 @@
 # =========================================
 # 部署脚本和配置模板
 # =========================================
-!run.sh
-!build-and-push.sh
 !gtagod.conf.example
 !Caddyfile.*.example
 !singbox-config.*.example
