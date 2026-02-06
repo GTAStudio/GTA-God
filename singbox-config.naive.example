@@ -1,0 +1,36 @@
+{
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
+  "inbounds": [
+    {
+      "type": "naive",
+      "tag": "naive-in",
+      "listen": "127.0.0.1",
+      "listen_port": {{NAIVE_PORT}},
+      "tcp_fast_open": true,
+      "tcp_multi_path": {{TCP_MULTI_PATH}},
+      "users": [
+        {
+          "username": "{{NAIVE_USER}}",
+          "password": "{{NAIVE_PASSWORD}}"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "server_name": "{{NAIVE_SNI}}",
+        "min_version": "1.3",
+        "kernel_tx": true,
+        "certificate_path": "/data/caddy/certificates/{{ACME_CA_DIR}}/wildcard_.{{DOMAIN}}/wildcard_.{{DOMAIN}}.crt",
+        "key_path": "/data/caddy/certificates/{{ACME_CA_DIR}}/wildcard_.{{DOMAIN}}/wildcard_.{{DOMAIN}}.key"
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ]
+}

@@ -20,8 +20,8 @@ docker login
 # 拉取最新基础镜像
 echo ""
 echo "📥 拉取最新基础镜像..."
-docker pull caddy:2.8-builder-alpine
-docker pull alpine:3.19
+docker pull golang:1.25-alpine
+docker pull alpine:3.23
 
 # 构建多架构镜像（需要 buildx）
 echo ""
@@ -37,7 +37,7 @@ docker buildx create --name naiveproxy-builder --use 2>/dev/null || docker build
 docker buildx build --no-cache \
     --platform linux/amd64,linux/arm64 \
     --build-arg CADDY_VERSION=latest \
-    --build-arg NAIVE_VERSION=naive \
+    --build-arg SINGBOX_VERSION=1.13.0-rc.2 \
     -t ${IMAGE_NAME}:latest \
     -t ${IMAGE_NAME}:${DATE_TAG} \
     --push \

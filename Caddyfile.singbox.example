@@ -1,0 +1,134 @@
+# =========================================
+# GTAGod Caddyfile - Layer4 全 443 端口分流配置
+# 版本: 4.1.0
+# 更新: 2026-01-01
+# =========================================
+#
+# 此配置配合 sing-box 1.13+ 使用:
+#   - Caddy 仅负责 L4 SNI 分流和 ACME 证书申请
+#   - sing-box 1.13+ 处理所有代理协议 (naive + anytls + anyreality)
+#
+# 分流逻辑：
+#   - NaiveProxy SNI (*.domain.com) → sing-box :8443 (naive inbound)
+#   - AnyTLS SNI (如 api.domain.com) → sing-box :8445 (anytls inbound)
+#   - AnyReality SNI (如 www.amazon.com) → sing-box :8444 (anyreality inbound)
+#
+# 架构图：
+# ┌────────────────────────────────────────────────────────────────────────────┐
+# │                       外部端口 443 (0.0.0.0:443)                           │
+# │                               │                                            │
+# │                    ┌──────────┴──────────┐                                 │
+# │                    │ Caddy Layer4        │                                 │
+# │                    │ (0.0.0.0:443)       │                                 │
+# │                    │ SNI 分流             │                                 │
+# │                    └──────────┬──────────┘                                 │
+# │           ┌───────────────────┼───────────────────┐                        │
+# │           │                   │                   │                        │
+# │           ▼                   ▼                   ▼                        │
+# │  ┌────────────────┐  ┌────────────────┐  ┌────────────────┐                │
+# │  │  ANYTLS_SNI    │  │ ANYREALITY_SNI │  │  其他所有 SNI   │                │
+# │  │ (api.domain)   │  │ (amazon.com)   │  │ (*.domain.com) │                │
+# │  │      │         │  │      │         │  │      │         │                │
+# │  │      ▼         │  │      ▼         │  │      ▼         │                │
+# │  │ localhost:8445 │  │ localhost:8444 │  │localhost:8443  │                │
+# │  │ (sing-box)     │  │ (sing-box)     │  │ (sing-box)     │                │
+# │  │ AnyTLS         │  │ AnyReality     │  │ NaiveProxy     │                │
+# │  └────────────────┘  └────────────────┘  └────────────────┘                │
+# └────────────────────────────────────────────────────────────────────────────┘
+#
+# =========================================
+
+{
+	# 生产环境建议关闭 debug
+	# debug
+	
+	email admin@{{DOMAIN}}
+	
+	# 使用 Cloudflare DNS-01 验证申请泛域名证书
+	acme_dns cloudflare {{CLOUDFLARE_API_TOKEN}}
+	
+	# ACME CA 配置（由部署脚本替换）
+	{{ACME_CA_CONFIG}}
+	
+	# =========================================
+	# 全局服务器配置 - 高并发优化
+	# =========================================
+	servers {
+		# 增加 HTTP/2 流并发限制
+		protocols h1 h2
+		
+		# 严格 SNI 主机名匹配
+		strict_sni_host insecure_off
+		
+		# 连接超时设置
+		timeouts {
+			read_body 30s
+			read_header 10s
+			write 30s
+			idle 120s
+		}
+		
+		# 限制最大请求头大小
+		max_header_size 16KB
+	}
+	
+	# =========================================
+	# Layer4 应用配置 - 全 443 端口 SNI 分流
+	# =========================================
+	# 
+	# 分流逻辑：
+	#   1. AnyTLS SNI (如 api.domain.com) → sing-box :8445
+	#   2. AnyReality SNI (如 www.amazon.com) → sing-box :8444
+	#   3. 其他所有 *.domain.com → NaiveProxy (sing-box :8443)
+	#
+	# =========================================
+	layer4 {
+		# 监听 0.0.0.0:443，根据 TLS SNI 分流
+		0.0.0.0:443 {
+			@anytls tls sni {{ANYTLS_SNI}}
+			@anyreality tls sni {{ANYREALITY_SNI}}
+			
+			# AnyTLS 流量 - 透传到 sing-box 8445 端口
+			route @anytls {
+				proxy {
+					upstream localhost:8445
+				}
+			}
+			
+			# AnyReality 流量 - 透传到 sing-box 8444 端口
+			route @anyreality {
+				proxy {
+					upstream localhost:8444
+				}
+			}
+			
+			# 默认路由 - 其他所有流量 → NaiveProxy (sing-box 8443 端口)
+			route {
+				proxy {
+					upstream localhost:8443
+				}
+			}
+		}
+	}
+}
+
+# =========================================
+# Caddy HTTPS 服务 - 仅用于申请证书
+# =========================================
+# 通过 on_demand_tls 或 自动证书申请来获取泛域名证书
+# 实际代理流量由 sing-box 处理
+# =========================================
+
+# 申请泛域名证书 (用于 NaiveProxy 和 AnyTLS)
+# 使用 8888 端口避免与 Layer4 :443 冲突
+*.{{DOMAIN}}:8888 {
+	# 绑定到 localhost 避免外部访问，仅用于触发证书申请
+	bind 127.0.0.1
+	
+	tls {
+		dns cloudflare {{CLOUDFLARE_API_TOKEN}}
+	}
+	
+	# 简单响应，用于健康检查
+	respond "GTAGod - sing-box 1.13+ powered" 200
+}

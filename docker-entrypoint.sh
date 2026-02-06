@@ -286,5 +286,62 @@ if [ -n "$SINGBOX_PID" ] && kill -0 $SINGBOX_PID 2>/dev/null; then
 fi
 echo "========================================="
 
-# 保持容器运行
-wait $CADDY_PID
+# 保持容器运行，同时监控 Caddy 和 sing-box
+# =========================================
+# 进程监控 + 证书自动重载
+# =========================================
+# 每 60 秒检查一次:
+#   1. Caddy 是否存活
+#   2. sing-box 是否存活（如果应该运行的话）
+#   3. 证书文件是否更新（自动重载 sing-box）
+# =========================================
+
+CERT_MTIME=""
+if [ "$NEEDS_CERT" = "true" ] && [ -n "$ACTUAL_CERT" ] && [ -f "$ACTUAL_CERT" ]; then
+    CERT_MTIME=$(stat -c %Y "$ACTUAL_CERT" 2>/dev/null || echo "")
+fi
+
+while true; do
+    # 检查 Caddy 是否存活
+    if ! kill -0 $CADDY_PID 2>/dev/null; then
+        echo "❌ Caddy (PID $CADDY_PID) has exited unexpectedly!"
+        echo "🔄 Exiting container to trigger restart..."
+        exit 1
+    fi
+
+    # 检查 sing-box 是否存活（如果之前成功启动过）
+    if [ -n "$SINGBOX_PID" ] && ! kill -0 $SINGBOX_PID 2>/dev/null; then
+        echo "⚠️  sing-box (PID $SINGBOX_PID) has exited, attempting restart..."
+        sing-box run -c /tmp/sing-box-config.json 2>&1 | tee /var/log/sing-box/sing-box.log &
+        SINGBOX_PID=$!
+        sleep 3
+        if kill -0 $SINGBOX_PID 2>/dev/null; then
+            echo "✅ sing-box restarted successfully (PID $SINGBOX_PID)"
+        else
+            echo "❌ sing-box restart failed, will retry in 60s"
+        fi
+    fi
+
+    # 检查证书是否更新（自动重载 sing-box）
+    if [ "$NEEDS_CERT" = "true" ] && [ -n "$ACTUAL_CERT" ] && [ -f "$ACTUAL_CERT" ]; then
+        NEW_MTIME=$(stat -c %Y "$ACTUAL_CERT" 2>/dev/null || echo "")
+        if [ -n "$NEW_MTIME" ] && [ -n "$CERT_MTIME" ] && [ "$NEW_MTIME" != "$CERT_MTIME" ]; then
+            echo "🔄 Certificate updated, reloading sing-box..."
+            CERT_MTIME="$NEW_MTIME"
+            if [ -n "$SINGBOX_PID" ] && kill -0 $SINGBOX_PID 2>/dev/null; then
+                kill $SINGBOX_PID 2>/dev/null
+                sleep 2
+                sing-box run -c /tmp/sing-box-config.json 2>&1 | tee /var/log/sing-box/sing-box.log &
+                SINGBOX_PID=$!
+                sleep 3
+                if kill -0 $SINGBOX_PID 2>/dev/null; then
+                    echo "✅ sing-box reloaded with new certificate"
+                else
+                    echo "❌ sing-box reload failed"
+                fi
+            fi
+        fi
+    fi
+
+    sleep 60
+done
