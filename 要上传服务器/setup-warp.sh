@@ -142,7 +142,12 @@ if "warp" not in outbound_tags:
     config["outbounds"].insert(0, warp_outbound)
     print("[INFO] 添加 WARP 出站")
 else:
-    print("[INFO] WARP 出站已存在，跳过")
+    # 如果已存在，强制更新 tcp_fast_open 属性
+    for o in config.get("outbounds", []):
+        if o.get("tag") == "warp":
+            o["tcp_fast_open"] = True
+            break
+    print("[INFO] WARP 出站已存在，已更新 tcp_fast_open 属性")
 
 # 添加路由配置: 默认走 WARP
 if "route" not in config:
