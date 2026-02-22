@@ -53,6 +53,7 @@ RUN xcaddy build ${CADDY_VERSION} \
 # Alpine 使用 musl libc，必须下载 musl 版本
 ARG TARGETARCH
 RUN set -ex && \
+    TARGETARCH=${TARGETARCH:-amd64} && \
     echo "==> TARGETARCH=${TARGETARCH}" && \
     if [ "$TARGETARCH" = "amd64" ]; then ARCH="amd64"; \
     elif [ "$TARGETARCH" = "arm64" ]; then ARCH="arm64"; \

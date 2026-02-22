@@ -91,6 +91,27 @@ if grep -q '"certificate_path"' /tmp/sing-box-config.json; then
 fi
 
 # =========================================
+# 信号处理 (优雅退出)
+# =========================================
+cleanup() {
+    echo "🛑 Received stop signal, shutting down gracefully..."
+    if [ -n "$SINGBOX_PID" ] && kill -0 $SINGBOX_PID 2>/dev/null; then
+        echo "🛑 Stopping sing-box (PID $SINGBOX_PID)..."
+        kill -TERM $SINGBOX_PID
+    fi
+    if [ -n "$CADDY_PID" ] && kill -0 $CADDY_PID 2>/dev/null; then
+        echo "🛑 Stopping Caddy (PID $CADDY_PID)..."
+        kill -TERM $CADDY_PID
+    fi
+    wait $SINGBOX_PID 2>/dev/null
+    wait $CADDY_PID 2>/dev/null
+    echo "✅ Shutdown complete."
+    exit 0
+}
+
+trap cleanup SIGTERM SIGINT SIGQUIT
+
+# =========================================
 # 启动 Caddy (用于 L4 分流和证书申请)
 # =========================================
 echo "🚀 Starting Caddy..."
@@ -343,5 +364,6 @@ while true; do
         fi
     fi
 
-    sleep 60
+    sleep 10 &
+    wait $!
 done
