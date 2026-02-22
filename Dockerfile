@@ -30,7 +30,7 @@ FROM golang:1.25-alpine AS builder
 # Caddy 2.10.1+ 需要 Go 1.25+ 编译
 ARG CADDY_VERSION=latest
 ARG XCADDY_VERSION=v0.4.5
-ARG SINGBOX_VERSION=1.13.0-rc.2
+ARG SINGBOX_VERSION=1.13.0-rc.4
 
 # 设置 GOTOOLCHAIN 允许自动下载更新的 Go 版本
 ENV GOTOOLCHAIN=auto
