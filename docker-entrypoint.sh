@@ -21,6 +21,7 @@
 # =========================================
 
 VERSION="4.1.0"
+SINGBOX_LOG_FILE="/var/log/sing-box/sing-box.log"
 
 echo "========================================="
 echo "GTAGod Container v${VERSION}"
@@ -105,8 +106,12 @@ cleanup() {
         echo "🛑 Stopping Caddy (PID $CADDY_PID)..."
         kill -TERM $CADDY_PID
     fi
+    if [ -n "$LOG_TAIL_PID" ] && kill -0 $LOG_TAIL_PID 2>/dev/null; then
+        kill -TERM $LOG_TAIL_PID 2>/dev/null
+    fi
     wait $SINGBOX_PID 2>/dev/null
     wait $CADDY_PID 2>/dev/null
+    wait $LOG_TAIL_PID 2>/dev/null
     echo "✅ Shutdown complete."
     exit 0
 }
@@ -128,18 +133,36 @@ CERT_WAIT_MAX="${CERT_WAIT_MAX:-180}"
 CERT_RETRY_INTERVAL="${CERT_RETRY_INTERVAL:-30}"
 CERT_RETRY_MAX="${CERT_RETRY_MAX:-0}"
 
+ensure_singbox_log_forwarder() {
+    mkdir -p /var/log/sing-box
+    touch "$SINGBOX_LOG_FILE"
+
+    if [ -n "$LOG_TAIL_PID" ] && kill -0 $LOG_TAIL_PID 2>/dev/null; then
+        return 0
+    fi
+
+    tail -n 0 -f "$SINGBOX_LOG_FILE" &
+    LOG_TAIL_PID=$!
+}
+
+stop_singbox() {
+    if [ -n "$SINGBOX_PID" ] && kill -0 $SINGBOX_PID 2>/dev/null; then
+        kill -TERM $SINGBOX_PID 2>/dev/null
+        wait $SINGBOX_PID 2>/dev/null
+    fi
+    SINGBOX_PID=""
+}
+
 start_singbox() {
-    if pgrep -x sing-box >/dev/null 2>&1; then
+    if [ -n "$SINGBOX_PID" ] && kill -0 $SINGBOX_PID 2>/dev/null; then
         return 0
     fi
 
     echo ""
     echo "🚀 Starting sing-box..."
 
-    # 直接输出到 stdout/stderr，这样 docker logs 可以看到
-    # 同时使用 tee 保存到文件以便查看历史
-    mkdir -p /var/log/sing-box
-    sing-box run -c /tmp/sing-box-config.json 2>&1 | tee /var/log/sing-box/sing-box.log &
+    ensure_singbox_log_forwarder
+    sing-box run -c /tmp/sing-box-config.json >> "$SINGBOX_LOG_FILE" 2>&1 &
     SINGBOX_PID=$!
     echo "✅ sing-box started with PID: $SINGBOX_PID"
 
@@ -159,7 +182,8 @@ start_singbox() {
         fi
     else
         echo "❌ sing-box failed to start! Logs:"
-        cat /var/log/sing-box/sing-box.log 2>/dev/null | tail -30 || echo "No log file"
+        tail -30 "$SINGBOX_LOG_FILE" 2>/dev/null || echo "No log file"
+        stop_singbox
         echo ""
         echo "⚠️  Continuing with Caddy only..."
     fi
@@ -335,13 +359,11 @@ while true; do
     # 检查 sing-box 是否存活（如果之前成功启动过）
     if [ -n "$SINGBOX_PID" ] && ! kill -0 $SINGBOX_PID 2>/dev/null; then
         echo "⚠️  sing-box (PID $SINGBOX_PID) has exited, attempting restart..."
-        sing-box run -c /tmp/sing-box-config.json 2>&1 | tee /var/log/sing-box/sing-box.log &
-        SINGBOX_PID=$!
-        sleep 3
-        if kill -0 $SINGBOX_PID 2>/dev/null; then
+        start_singbox
+        if [ -n "$SINGBOX_PID" ] && kill -0 $SINGBOX_PID 2>/dev/null; then
             echo "✅ sing-box restarted successfully (PID $SINGBOX_PID)"
         else
-            echo "❌ sing-box restart failed, will retry in 60s"
+            echo "❌ sing-box restart failed, will retry in 10s"
         fi
     fi
 
@@ -352,12 +374,10 @@ while true; do
             echo "🔄 Certificate updated, reloading sing-box..."
             CERT_MTIME="$NEW_MTIME"
             if [ -n "$SINGBOX_PID" ] && kill -0 $SINGBOX_PID 2>/dev/null; then
-                kill $SINGBOX_PID 2>/dev/null
+                stop_singbox
                 sleep 2
-                sing-box run -c /tmp/sing-box-config.json 2>&1 | tee /var/log/sing-box/sing-box.log &
-                SINGBOX_PID=$!
-                sleep 3
-                if kill -0 $SINGBOX_PID 2>/dev/null; then
+                start_singbox
+                if [ -n "$SINGBOX_PID" ] && kill -0 $SINGBOX_PID 2>/dev/null; then
                     echo "✅ sing-box reloaded with new certificate"
                 else
                     echo "❌ sing-box reload failed"

@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # =========================================
 # GTAGod Dockerfile - sing-box 1.13+ 统一架构
 # 版本: 4.1.0
@@ -16,7 +17,7 @@
 #   - Go: 1.26 (sing-box 1.13+ 需要 Go 1.24+)
 #   - Alpine: 3.23 (包含 Go 1.26, GCC 15, apk-tools v3)
 #   - xcaddy: v0.4.5
-#   - Caddy: latest (2.11.1+)
+#   - Caddy: v2.11.1
 #   - sing-box: 1.13.1
 #
 # =========================================
@@ -27,7 +28,7 @@ FROM golang:1.26-alpine AS builder
 
 # 构建参数 - sing-box 1.13+ 支持 naive inbound
 # Caddy 2.11+ 需要 Go 1.25+ 编译
-ARG CADDY_VERSION=latest
+ARG CADDY_VERSION=v2.11.1
 ARG XCADDY_VERSION=v0.4.5
 ARG SINGBOX_VERSION=1.13.1
 
@@ -35,17 +36,21 @@ ARG SINGBOX_VERSION=1.13.1
 ENV GOTOOLCHAIN=local
 
 # 安装构建依赖
-RUN apk add --no-cache git ca-certificates curl
+RUN apk add --no-cache git ca-certificates curl jq
 
 # 安装 xcaddy
-RUN go install github.com/caddyserver/xcaddy/cmd/xcaddy@${XCADDY_VERSION}
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    go install github.com/caddyserver/xcaddy/cmd/xcaddy@${XCADDY_VERSION}
 
 # 构建 Caddy - 仅需要 cloudflare DNS 和 layer4 插件
 # sing-box 1.13+ 处理所有代理协议，不再需要 forwardproxy
-RUN xcaddy build ${CADDY_VERSION} \
-    --with github.com/caddy-dns/cloudflare \
-    --with github.com/mholt/caddy-l4 \
-    --output /usr/bin/caddy
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    xcaddy build ${CADDY_VERSION} \
+        --with github.com/caddy-dns/cloudflare \
+        --with github.com/mholt/caddy-l4 \
+        --output /usr/bin/caddy
 
 # 下载 sing-box 1.13+ (支持 naive inbound)
 # 使用 TARGETARCH 支持 buildx 多架构构建
@@ -57,8 +62,22 @@ RUN set -ex && \
     if [ "$TARGETARCH" = "amd64" ]; then ARCH="amd64"; \
     elif [ "$TARGETARCH" = "arm64" ]; then ARCH="arm64"; \
     else echo "Unsupported arch: $TARGETARCH"; exit 1; fi && \
+    ASSET_NAME="sing-box-${SINGBOX_VERSION}-linux-${ARCH}-musl.tar.gz" && \
     echo "==> Downloading sing-box v${SINGBOX_VERSION} for ${ARCH} (musl)..." && \
-    wget -O /tmp/sing-box.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-${ARCH}-musl.tar.gz" && \
+    EXPECTED_DIGEST=$(curl -fsSL \
+        --retry 5 \
+        --retry-all-errors \
+        --connect-timeout 15 \
+        "https://api.github.com/repos/SagerNet/sing-box/releases/tags/v${SINGBOX_VERSION}" \
+        | jq -r --arg asset "$ASSET_NAME" '.assets[] | select(.name == $asset) | .digest') && \
+    [ -n "$EXPECTED_DIGEST" ] && [ "$EXPECTED_DIGEST" != "null" ] || { echo "Missing digest for $ASSET_NAME"; exit 1; } && \
+    curl -fsSL \
+        --retry 5 \
+        --retry-all-errors \
+        --connect-timeout 15 \
+        -o /tmp/sing-box.tar.gz \
+        "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/${ASSET_NAME}" && \
+    echo "${EXPECTED_DIGEST#sha256:}  /tmp/sing-box.tar.gz" | sha256sum -c - && \
     tar -xzf /tmp/sing-box.tar.gz -C /tmp && \
     cp /tmp/sing-box-*/sing-box /usr/bin/sing-box && \
     chmod +x /usr/bin/sing-box && \
@@ -79,7 +98,6 @@ RUN apk add --no-cache \
         ca-certificates \
         libcap \
         tzdata \
-        wget \
         jq && \
     # 设置时区
     cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \
@@ -116,6 +134,8 @@ VOLUME ["/config", "/data", "/var/log/caddy", "/etc/sing-box", "/var/log/sing-bo
 
 # 工作目录
 WORKDIR /config/caddy
+
+STOPSIGNAL SIGTERM
 
 # 复制启动脚本
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
