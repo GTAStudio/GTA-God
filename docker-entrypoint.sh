@@ -40,12 +40,14 @@ fi
 echo "📝 Caddyfile found, validating..."
 
 # 验证 Caddyfile 格式
-if caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile 2>&1 | grep -q "Valid configuration"; then
+if caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/tmp/caddy-validate.log 2>&1; then
     echo "✅ Caddyfile validation passed"
 else
     echo "❌ ERROR: Caddyfile validation failed!"
+    cat /tmp/caddy-validate.log
     exit 1
 fi
+rm -f /tmp/caddy-validate.log
 
 # =========================================
 # 检查 sing-box 配置

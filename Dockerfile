@@ -1,7 +1,7 @@
 # =========================================
 # GTAGod Dockerfile - sing-box 1.13+ 统一架构
 # 版本: 4.1.0
-# 更新: 2026-01-01
+# 更新: 2026-03-01
 # =========================================
 #
 # 此版本使用 sing-box 1.13+ 原生 naive inbound
@@ -12,28 +12,27 @@
 #   - Caddy: L4 SNI 分流 + ACME 证书申请
 #   - sing-box 1.13+: naive + anytls + anyreality
 #
-# 依赖版本 (2026-01-01 更新):
-#   - Go: 1.25 (sing-box 1.13+ 需要 Go 1.24+)
-#   - Alpine: 3.23 (包含 Go 1.25, GCC 15, apk-tools v3)
+# 依赖版本 (2026-03-01 更新):
+#   - Go: 1.26 (sing-box 1.13+ 需要 Go 1.24+)
+#   - Alpine: 3.23 (包含 Go 1.26, GCC 15, apk-tools v3)
 #   - xcaddy: v0.4.5
-#   - Caddy: latest (2.10.2+)
-#   - sing-box: 1.13.x (自动获取最新 1.13.x 版本)
+#   - Caddy: latest (2.11.1+)
+#   - sing-box: 1.13.1
 #
 # =========================================
 
 # 构建阶段 - 使用 Alpine 基础镜像
-# Go 1.25 是 2025 年 8 月发布的稳定版，需要 macOS 12+ / Windows 10+
-# 新特性：容器感知 GOMAXPROCS、DWARF5 调试信息、实验性 GC
-FROM golang:1.25-alpine AS builder
+# Go 1.26 稳定版，遵循稳定工具链实践
+FROM golang:1.26-alpine AS builder
 
 # 构建参数 - sing-box 1.13+ 支持 naive inbound
-# Caddy 2.10.1+ 需要 Go 1.25+ 编译
+# Caddy 2.11+ 需要 Go 1.25+ 编译
 ARG CADDY_VERSION=latest
 ARG XCADDY_VERSION=v0.4.5
-ARG SINGBOX_VERSION=1.13.0-rc.4
+ARG SINGBOX_VERSION=1.13.1
 
-# 设置 GOTOOLCHAIN 允许自动下载更新的 Go 版本
-ENV GOTOOLCHAIN=auto
+# 固定使用镜像内稳定 Go 工具链，避免自动下载带来的不可重复构建
+ENV GOTOOLCHAIN=local
 
 # 安装构建依赖
 RUN apk add --no-cache git ca-certificates curl
@@ -124,7 +123,7 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 # 健康检查 - Caddy + sing-box + 证书就绪状态
 HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=3 \
-    CMD sh -c 'pgrep caddy >/dev/null 2>&1 || exit 1; CERT_PATH=$(jq -r "..|.certificate_path? // empty" /etc/sing-box/config.json | head -n1); if [ -n "$CERT_PATH" ]; then [ -f "$CERT_PATH" ] && [ -f "${CERT_PATH%.crt}.key" ] || exit 1; fi; pgrep sing-box >/dev/null 2>&1 || exit 1'
+    CMD sh -c 'pgrep caddy >/dev/null 2>&1 || exit 1; CONFIG_PATH=/tmp/sing-box-config.json; [ -f "$CONFIG_PATH" ] || CONFIG_PATH=/etc/sing-box/config.json; CERT_PATH=$(jq -r "..|.certificate_path? // empty" "$CONFIG_PATH" | head -n1); if [ -n "$CERT_PATH" ]; then [ -f "$CERT_PATH" ] && [ -f "${CERT_PATH%.crt}.key" ] || exit 1; fi; pgrep sing-box >/dev/null 2>&1 || exit 1'
 
 # 启动命令
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
