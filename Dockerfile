@@ -17,7 +17,7 @@
 #   - Go: 1.26 (sing-box 1.13+ 需要 Go 1.24+)
 #   - Alpine: 3.23 (包含 Go 1.26, GCC 15, apk-tools v3)
 #   - xcaddy: v0.4.5
-#   - Caddy: v2.11.1
+#   - Caddy: v2.11.2
 #   - sing-box: 1.13.2
 #
 # =========================================
@@ -28,7 +28,7 @@ FROM golang:1.26-alpine AS builder
 
 # 构建参数 - sing-box 1.13+ 支持 naive inbound
 # Caddy 2.11+ 需要 Go 1.25+ 编译
-ARG CADDY_VERSION=v2.11.1
+ARG CADDY_VERSION=v2.11.2
 ARG XCADDY_VERSION=v0.4.5
 ARG SINGBOX_VERSION=1.13.2
 

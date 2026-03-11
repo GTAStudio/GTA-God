@@ -153,6 +153,21 @@ stop_singbox() {
     SINGBOX_PID=""
 }
 
+validate_singbox_config() {
+    VALIDATE_LOG="/tmp/sing-box-check.log"
+
+    if sing-box check -c /tmp/sing-box-config.json >"$VALIDATE_LOG" 2>&1; then
+        echo "✅ sing-box config validation passed"
+        rm -f "$VALIDATE_LOG"
+        return 0
+    fi
+
+    echo "❌ sing-box config validation failed!"
+    cat "$VALIDATE_LOG"
+    rm -f "$VALIDATE_LOG"
+    return 1
+}
+
 start_singbox() {
     if [ -n "$SINGBOX_PID" ] && kill -0 $SINGBOX_PID 2>/dev/null; then
         return 0
@@ -160,6 +175,11 @@ start_singbox() {
 
     echo ""
     echo "🚀 Starting sing-box..."
+
+    if ! validate_singbox_config; then
+        echo "⚠️  Skipping sing-box start until config is fixed..."
+        return 1
+    fi
 
     ensure_singbox_log_forwarder
     sing-box run -c /tmp/sing-box-config.json >> "$SINGBOX_LOG_FILE" 2>&1 &

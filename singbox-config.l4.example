@@ -11,13 +11,10 @@
         "detour": "direct"
       }
     ],
-    "rules": [
-      {
-        "outbound": "any",
-        "server": "doh-tcp"
-      }
-    ],
     "strategy": "ipv4_only"
+  },
+  "route": {
+    "default_domain_resolver": "doh-tcp"
   },
   "inbounds": [
     {

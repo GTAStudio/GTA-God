@@ -14,6 +14,7 @@
 #   3. 运行 ./run.sh
 #
 # 注意: gtagod.conf 包含敏感信息，已加入 .gitignore
+# 注意: 配置文件按纯 KEY=value 文本解析，不支持 shell 语句、命令替换或函数
 #
 # =========================================
 
@@ -115,10 +116,52 @@ ANYREALITY_SHORT_ID="a1b2c3d4e5f67890"
 # 网络配置 (可选)
 # =========================================
 # 禁用 IPv6 (解决日本 Sakura VPS 等服务器的连接问题)
-# 本项目已配置为仅支持 IPv4，将自动禁用 IPv6 以避免连接问题。
+# 仅控制容器和生成配置的 IPv4 偏好。
+# 若要真正修改宿主机 IPv6，请同时开启 HOST_IPV6_TUNING。
 # 可选值: true, false
 # 默认: true
 DISABLE_IPV6="true"
+
+# 是否初始化宿主机系统
+# 开启后会修改时区、安装基础依赖并尝试同步时间
+# 可选值: true, false
+# 默认: true
+PREPARE_HOST_SYSTEM="true"
+
+# 是否在未检测到 Docker 时自动安装 Docker
+# 开启后会执行官方安装脚本: curl -fsSL https://get.docker.com | sh
+# 可选值: true, false
+# 默认: true
+AUTO_INSTALL_DOCKER="true"
+
+# 是否调整宿主机 IPv6 配置
+# 开启后会写入 /etc/sysctl.conf 并清理现有 IPv6 地址
+# 可选值: true, false
+# 默认: true
+HOST_IPV6_TUNING="true"
+
+# 是否调整宿主机 DNS / gai 配置
+# 开启后会修改 /etc/gai.conf 和 /etc/resolv.conf
+# 可选值: true, false
+# 默认: true
+HOST_DNS_TUNING="true"
+
+# 是否应用宿主机网络优化
+# 开启后会写入 BBR 和 TCP 相关 sysctl 参数
+# 可选值: true, false
+# 默认: true
+HOST_NETWORK_OPTIMIZATION="true"
+
+# 是否管理宿主机防火墙
+# 开启后会禁用 ufw/firewalld，并清空 iptables 规则
+# 可选值: true, false
+# 默认: true
+HOST_FIREWALL_MANAGEMENT="true"
+
+# 是否启动 Watchtower 自动更新容器
+# 可选值: true, false
+# 默认: true
+ENABLE_WATCHTOWER="true"
 
 # 是否启用 MPTCP (tcp_multi_path)
 # 仅在内核支持 MPTCP 时开启，否则可能导致连接不稳定
@@ -143,3 +186,26 @@ CERT_WAIT_MAX="180"
 CERT_RETRY_INTERVAL="30"
 # 证书重试次数上限（0 表示无限重试）
 CERT_RETRY_MAX="0"
+
+# =========================================
+# 容器运行时配置 (可选)
+# =========================================
+# Go 运行时内存上限
+# 默认: 384MiB
+CONTAINER_GOMEMLIMIT="384MiB"
+
+# 容器进程数限制
+# 默认: 512
+CONTAINER_PIDS_LIMIT="512"
+
+# 容器 /tmp 使用 tmpfs 的大小
+# 默认: 64m
+CONTAINER_TMPFS_SIZE="64m"
+
+# Docker 日志轮转单文件大小
+# 默认: 10m
+CONTAINER_LOG_MAX_SIZE="10m"
+
+# Docker 日志轮转保留文件数
+# 默认: 3
+CONTAINER_LOG_MAX_FILE="3"

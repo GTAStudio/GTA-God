@@ -47,6 +47,9 @@
 	# 使用 Cloudflare DNS-01 验证申请泛域名证书
 	acme_dns cloudflare {{CLOUDFLARE_API_TOKEN}}
 	
+	# 为需要 DNS 提供者的其他 TLS 功能保留统一入口
+	dns cloudflare {{CLOUDFLARE_API_TOKEN}}
+	
 	# ACME CA 配置（由部署脚本替换）
 	{{ACME_CA_CONFIG}}
 	
@@ -56,9 +59,6 @@
 	servers {
 		# 增加 HTTP/2 流并发限制
 		protocols h1 h2
-		
-		# 严格 SNI 主机名匹配
-		strict_sni_host insecure_off
 		
 		# 连接超时设置
 		timeouts {
@@ -128,9 +128,7 @@
 	# 绑定到 localhost 避免外部访问，仅用于触发证书申请
 	bind 127.0.0.1
 	
-	tls {
-		dns cloudflare {{CLOUDFLARE_API_TOKEN}}
-	}
+	tls
 	
 	# 简单响应，用于健康检查
 	respond "GTAGod - sing-box 1.13+ powered" 200
