@@ -24,7 +24,7 @@ on:
         default: false
 
 # =========================================
-# GTAGod v4.1.0 - sing-box 1.13+ 统一架构
+# GTAGod v4.1.1 - sing-box 1.13+ 统一架构
 # =========================================
 # 
 # sing-box 1.13+ 原生支持 naive inbound
@@ -62,7 +62,7 @@ jobs:
           images: ${{ secrets.DOCKERHUB_USERNAME }}/gtagod
           tags: |
             type=raw,value=latest
-            type=raw,value=v4.1.0
+            type=raw,value=v4.1.1
             type=raw,value={{date 'YYYYMMDD'}}
             type=sha,prefix={{date 'YYYYMMDD'}}-
       
@@ -84,7 +84,7 @@ jobs:
       
       - name: Verify image
         run: |
-          echo "🔍 Verifying GTAGod v4.1.0 image..."
+          echo "🔍 Verifying GTAGod v4.1.1 image..."
           docker pull ${{ secrets.DOCKERHUB_USERNAME }}/gtagod:latest
           
           echo "📦 Checking Caddy..."
@@ -96,7 +96,7 @@ jobs:
           echo "📦 Checking sing-box 1.13+ (native naive inbound)..."
           docker run --rm --entrypoint sing-box ${{ secrets.DOCKERHUB_USERNAME }}/gtagod:latest version
           
-          echo "✅ GTAGod v4.1.0 image verification passed!"
+          echo "✅ GTAGod v4.1.1 image verification passed!"
           echo "   - Caddy with layer4 + cloudflare modules"
           echo "   - sing-box 1.13+ with native naive inbound"
           echo "   - No external forwardproxy needed!"
