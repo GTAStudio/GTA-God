@@ -139,11 +139,12 @@ STOPSIGNAL SIGTERM
 
 # 复制启动脚本
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+COPY healthcheck.sh /usr/local/bin/healthcheck.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/healthcheck.sh
 
 # 健康检查 - Caddy + sing-box + 证书就绪状态
 HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=3 \
-    CMD sh -c 'pgrep caddy >/dev/null 2>&1 || exit 1; CONFIG_PATH=/tmp/sing-box-config.json; [ -f "$CONFIG_PATH" ] || CONFIG_PATH=/etc/sing-box/config.json; CERT_PATH=$(jq -r "..|.certificate_path? // empty" "$CONFIG_PATH" | head -n1); if [ -n "$CERT_PATH" ]; then [ -f "$CERT_PATH" ] && [ -f "${CERT_PATH%.crt}.key" ] || exit 1; fi; pgrep sing-box >/dev/null 2>&1 || exit 1'
+    CMD /usr/local/bin/healthcheck.sh
 
 # 启动命令
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
