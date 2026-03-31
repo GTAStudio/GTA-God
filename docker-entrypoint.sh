@@ -288,26 +288,26 @@ if [ "$NEEDS_CERT" = "true" ]; then
     # 证书查找函数 - 单次 find 遍历，按优先级匹配
     find_certificate() {
         local cert=""
-        local all_certs
-        all_certs=$(find /data/caddy/certificates -name "*.crt" -type f 2>/dev/null)
-        [ -z "$all_certs" ] && return 1
+        local cert_list
+        cert_list=$(find /data/caddy/certificates -name "*.crt" -type f 2>/dev/null)
+        [ -z "$cert_list" ] && return 1
 
         # 策略1: 通配符证书 wildcard_*.domain.com (最常见)
-        cert=$(echo "$all_certs" | grep "/wildcard_.*\.${ROOT_DOMAIN}/" | head -1)
+        cert=$(echo "$cert_list" | grep "/wildcard_.*\.${ROOT_DOMAIN}/" | head -1)
         if [ -n "$cert" ] && [ -f "$cert" ]; then echo "$cert"; return 0; fi
 
         # 策略2: 完整域名证书 subdomain.domain.com
         if [ -n "$DOMAIN" ]; then
-            cert=$(echo "$all_certs" | grep "/${DOMAIN}/" | head -1)
+            cert=$(echo "$cert_list" | grep "/${DOMAIN}/" | head -1)
             if [ -n "$cert" ] && [ -f "$cert" ]; then echo "$cert"; return 0; fi
         fi
 
         # 策略3: 根域名证书 domain.com
-        cert=$(echo "$all_certs" | grep "/${ROOT_DOMAIN}/" | head -1)
+        cert=$(echo "$cert_list" | grep "/${ROOT_DOMAIN}/" | head -1)
         if [ -n "$cert" ] && [ -f "$cert" ]; then echo "$cert"; return 0; fi
 
         # 策略4: 任意包含根域名的证书
-        cert=$(echo "$all_certs" | grep -i "${ROOT_DOMAIN}" | head -1)
+        cert=$(echo "$cert_list" | grep -i "${ROOT_DOMAIN}" | head -1)
         if [ -n "$cert" ] && [ -f "$cert" ]; then echo "$cert"; return 0; fi
 
         return 1
@@ -315,12 +315,15 @@ if [ "$NEEDS_CERT" = "true" ]; then
 
     update_cert_paths() {
         echo "🔧 Updating sing-box config with certificate paths..."
-        jq --arg cert "$ACTUAL_CERT" --arg key "$ACTUAL_KEY" \
+        if ! jq --arg cert "$ACTUAL_CERT" --arg key "$ACTUAL_KEY" \
             '(.inbounds[] | select(.tls?.certificate_path != null) | .tls) |= (.certificate_path = $cert | .key_path = $key)' \
-            /tmp/sing-box-config.json > /tmp/sing-box-config.json.tmp && \
-            mv /tmp/sing-box-config.json.tmp /tmp/sing-box-config.json
-        if [ $? -ne 0 ]; then
+            /tmp/sing-box-config.json > /tmp/sing-box-config.json.tmp; then
             echo "❌ Failed to update certificate paths with jq"
+            rm -f /tmp/sing-box-config.json.tmp
+            return 1
+        fi
+        if ! mv /tmp/sing-box-config.json.tmp /tmp/sing-box-config.json; then
+            echo "❌ Failed to replace sing-box config after cert path update"
             return 1
         fi
         echo "✅ Certificate paths updated: $ACTUAL_CERT"
