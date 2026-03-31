@@ -6,15 +6,20 @@
   "dns": {
     "servers": [
       {
-        "tag": "doh-tcp",
+        "tag": "doh-cf",
         "address": "https://1.1.1.1/dns-query",
+        "detour": "direct"
+      },
+      {
+        "tag": "doh-google",
+        "address": "https://8.8.8.8/dns-query",
         "detour": "direct"
       }
     ],
     "strategy": "ipv4_only"
   },
   "route": {
-    "default_domain_resolver": "doh-tcp"
+    "default_domain_resolver": "doh-cf"
   },
   "inbounds": [
     {

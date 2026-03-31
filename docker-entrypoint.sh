@@ -62,33 +62,36 @@ fi
 echo "📝 sing-box config found"
 
 # 复制配置到可写位置
-cp /etc/sing-box/config.json /tmp/sing-box-config.json
+if ! cp /etc/sing-box/config.json /tmp/sing-box-config.json; then
+    echo "❌ ERROR: Failed to copy sing-box config to /tmp"
+    exit 1
+fi
 
 # =========================================
-# 检测配置类型
+# 检测配置类型 (使用 jq 精确解析 JSON)
 # =========================================
 HAS_NAIVE=false
 HAS_ANYTLS=false
 HAS_ANYREALITY=false
 NEEDS_CERT=false
 
-if grep -q '"type": "naive"' /tmp/sing-box-config.json; then
+if jq -e '.inbounds[]? | select(.type == "naive")' /tmp/sing-box-config.json >/dev/null 2>&1; then
     HAS_NAIVE=true
     echo "✅ Detected NaiveProxy inbound"
 fi
 
-if grep -q '"type": "anytls"' /tmp/sing-box-config.json; then
+if jq -e '.inbounds[]? | select(.type == "anytls")' /tmp/sing-box-config.json >/dev/null 2>&1; then
     HAS_ANYTLS=true
     echo "✅ Detected AnyTLS inbound"
 fi
 
-if grep -q '"reality"' /tmp/sing-box-config.json && grep -q '"private_key"' /tmp/sing-box-config.json; then
+if jq -e '.inbounds[]? | select(.tls?.reality?.enabled == true and .tls?.reality?.private_key != null)' /tmp/sing-box-config.json >/dev/null 2>&1; then
     HAS_ANYREALITY=true
     echo "✅ Detected AnyReality inbound"
 fi
 
 # 检测是否需要证书 (naive 和非 reality 的 anytls 都需要证书)
-if grep -q '"certificate_path"' /tmp/sing-box-config.json; then
+if jq -e '.inbounds[]? | select(.tls?.certificate_path != null)' /tmp/sing-box-config.json >/dev/null 2>&1; then
     NEEDS_CERT=true
     echo "📋 Certificate required for TLS inbounds"
 fi
@@ -98,20 +101,37 @@ fi
 # =========================================
 cleanup() {
     echo "🛑 Received stop signal, shutting down gracefully..."
-    if [ -n "$SINGBOX_PID" ] && kill -0 $SINGBOX_PID 2>/dev/null; then
-        echo "🛑 Stopping sing-box (PID $SINGBOX_PID)..."
-        kill -TERM $SINGBOX_PID
-    fi
-    if [ -n "$CADDY_PID" ] && kill -0 $CADDY_PID 2>/dev/null; then
-        echo "🛑 Stopping Caddy (PID $CADDY_PID)..."
-        kill -TERM $CADDY_PID
-    fi
-    if [ -n "$LOG_TAIL_PID" ] && kill -0 $LOG_TAIL_PID 2>/dev/null; then
-        kill -TERM $LOG_TAIL_PID 2>/dev/null
-    fi
-    wait $SINGBOX_PID 2>/dev/null
-    wait $CADDY_PID 2>/dev/null
-    wait $LOG_TAIL_PID 2>/dev/null
+    # Send SIGTERM to all managed processes
+    for _pid_var in SINGBOX_PID CADDY_PID LOG_TAIL_PID; do
+        eval "_pid=\$$_pid_var"
+        if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null; then
+            echo "🛑 Stopping $_pid_var (PID $_pid)..."
+            kill -TERM "$_pid" 2>/dev/null
+        fi
+    done
+    # Wait up to 10s for graceful shutdown, then SIGKILL
+    _timeout=10
+    while [ $_timeout -gt 0 ]; do
+        _any_alive=false
+        for _pid_var in SINGBOX_PID CADDY_PID; do
+            eval "_pid=\$$_pid_var"
+            if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null; then
+                _any_alive=true
+            fi
+        done
+        if [ "$_any_alive" = "false" ]; then break; fi
+        sleep 1
+        _timeout=$((_timeout - 1))
+    done
+    # Force kill any remaining processes
+    for _pid_var in SINGBOX_PID CADDY_PID LOG_TAIL_PID; do
+        eval "_pid=\$$_pid_var"
+        if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null; then
+            echo "⚠️  Force killing $_pid_var (PID $_pid)..."
+            kill -9 "$_pid" 2>/dev/null
+        fi
+    done
+    wait 2>/dev/null
     echo "✅ Shutdown complete."
     exit 0
 }
@@ -124,6 +144,11 @@ trap cleanup SIGTERM SIGINT SIGQUIT
 echo "🚀 Starting Caddy..."
 caddy run --config /etc/caddy/Caddyfile --adapter caddyfile &
 CADDY_PID=$!
+sleep 2
+if ! kill -0 "$CADDY_PID" 2>/dev/null; then
+    echo "❌ Caddy failed to start (exited within 2s)"
+    exit 1
+fi
 echo "✅ Caddy started with PID: $CADDY_PID"
 
 # =========================================
@@ -131,14 +156,15 @@ echo "✅ Caddy started with PID: $CADDY_PID"
 # =========================================
 CERT_WAIT_MAX="${CERT_WAIT_MAX:-180}"
 CERT_RETRY_INTERVAL="${CERT_RETRY_INTERVAL:-30}"
-CERT_RETRY_MAX="${CERT_RETRY_MAX:-0}"
+CERT_RETRY_MAX="${CERT_RETRY_MAX:-10}"
 SINGBOX_RESTART_ATTEMPTS=0
+SINGBOX_MAX_RESTART_ATTEMPTS=10
 
 ensure_singbox_log_forwarder() {
     mkdir -p /var/log/sing-box
     touch "$SINGBOX_LOG_FILE"
 
-    if [ -n "$LOG_TAIL_PID" ] && kill -0 $LOG_TAIL_PID 2>/dev/null; then
+    if [ -n "$LOG_TAIL_PID" ] && kill -0 "$LOG_TAIL_PID" 2>/dev/null; then
         return 0
     fi
 
@@ -147,9 +173,9 @@ ensure_singbox_log_forwarder() {
 }
 
 stop_singbox() {
-    if [ -n "$SINGBOX_PID" ] && kill -0 $SINGBOX_PID 2>/dev/null; then
-        kill -TERM $SINGBOX_PID 2>/dev/null
-        wait $SINGBOX_PID 2>/dev/null
+    if [ -n "$SINGBOX_PID" ] && kill -0 "$SINGBOX_PID" 2>/dev/null; then
+        kill -TERM "$SINGBOX_PID" 2>/dev/null
+        wait "$SINGBOX_PID" 2>/dev/null
     fi
     SINGBOX_PID=""
 }
@@ -207,7 +233,7 @@ get_singbox_restart_delay() {
 }
 
 start_singbox() {
-    if [ -n "$SINGBOX_PID" ] && kill -0 $SINGBOX_PID 2>/dev/null; then
+    if [ -n "$SINGBOX_PID" ] && kill -0 "$SINGBOX_PID" 2>/dev/null; then
         return 0
     fi
 
@@ -225,7 +251,7 @@ start_singbox() {
     echo "✅ sing-box started with PID: $SINGBOX_PID"
 
     sleep 3
-    if kill -0 $SINGBOX_PID 2>/dev/null; then
+    if kill -0 "$SINGBOX_PID" 2>/dev/null; then
         SINGBOX_RESTART_ATTEMPTS=0
         echo "✅ sing-box is running successfully!"
         
@@ -252,48 +278,56 @@ if [ "$NEEDS_CERT" = "true" ]; then
     echo ""
     echo "🔍 Waiting for SSL certificates..."
     
-    # 提取域名信息
-    DOMAIN=$(grep -o '"server_name"[[:space:]]*:[[:space:]]*"[^"]*"' /tmp/sing-box-config.json | head -1 | cut -d'"' -f4)
+    # 提取域名信息 (使用 jq 精确解析)
+    DOMAIN=$(jq -r '[.inbounds[]? | .tls?.server_name // empty] | first // empty' /tmp/sing-box-config.json 2>/dev/null)
     ROOT_DOMAIN=$(echo "$DOMAIN" | awk -F. '{if(NF>=2) print $(NF-1)"."$NF; else print $0}')
     if [ -z "$ROOT_DOMAIN" ]; then
         ROOT_DOMAIN="example.com"
     fi
     echo "📋 Domain: $DOMAIN (root: $ROOT_DOMAIN)"
 
-    # 证书查找函数 - 支持多种路径格式
+    # 证书查找函数 - 单次 find 遍历，按优先级匹配
     find_certificate() {
         local cert=""
-        
+        local cert_list
+        cert_list=$(find /data/caddy/certificates -name "*.crt" -type f 2>/dev/null)
+        [ -z "$cert_list" ] && return 1
+
         # 策略1: 通配符证书 wildcard_*.domain.com (最常见)
-        cert=$(find /data/caddy/certificates -name "*.crt" -path "*/wildcard_*.${ROOT_DOMAIN}/*" 2>/dev/null | head -1)
+        cert=$(echo "$cert_list" | grep "/wildcard_.*\.${ROOT_DOMAIN}/" | head -1)
         if [ -n "$cert" ] && [ -f "$cert" ]; then echo "$cert"; return 0; fi
-        
+
         # 策略2: 完整域名证书 subdomain.domain.com
         if [ -n "$DOMAIN" ]; then
-            cert=$(find /data/caddy/certificates -name "*.crt" -path "*/${DOMAIN}/*" 2>/dev/null | head -1)
+            cert=$(echo "$cert_list" | grep "/${DOMAIN}/" | head -1)
             if [ -n "$cert" ] && [ -f "$cert" ]; then echo "$cert"; return 0; fi
         fi
-        
+
         # 策略3: 根域名证书 domain.com
-        cert=$(find /data/caddy/certificates -name "*.crt" -path "*/${ROOT_DOMAIN}/*" 2>/dev/null | head -1)
+        cert=$(echo "$cert_list" | grep "/${ROOT_DOMAIN}/" | head -1)
         if [ -n "$cert" ] && [ -f "$cert" ]; then echo "$cert"; return 0; fi
-        
+
         # 策略4: 任意包含根域名的证书
-        cert=$(find /data/caddy/certificates -name "*.crt" 2>/dev/null | grep -i "${ROOT_DOMAIN}" | head -1)
+        cert=$(echo "$cert_list" | grep -i "${ROOT_DOMAIN}" | head -1)
         if [ -n "$cert" ] && [ -f "$cert" ]; then echo "$cert"; return 0; fi
-        
-        # 策略5: 任意有效证书（最后手段）
-        cert=$(find /data/caddy/certificates -name "*.crt" -type f 2>/dev/null | head -1)
-        if [ -n "$cert" ] && [ -f "$cert" ]; then echo "$cert"; return 0; fi
-        
+
         return 1
     }
 
     update_cert_paths() {
         echo "🔧 Updating sing-box config with certificate paths..."
-        sed -i "s|\"certificate_path\"[[:space:]]*:[[:space:]]*\"[^\"]*\"|\"certificate_path\": \"${ACTUAL_CERT}\"|g" /tmp/sing-box-config.json
-        sed -i "s|\"key_path\"[[:space:]]*:[[:space:]]*\"[^\"]*\"|\"key_path\": \"${ACTUAL_KEY}\"|g" /tmp/sing-box-config.json
-        echo "✅ Certificate paths updated"
+        if ! jq --arg cert "$ACTUAL_CERT" --arg key "$ACTUAL_KEY" \
+            '(.inbounds[] | select(.tls?.certificate_path != null) | .tls) |= (.certificate_path = $cert | .key_path = $key)' \
+            /tmp/sing-box-config.json > /tmp/sing-box-config.json.tmp; then
+            echo "❌ Failed to update certificate paths with jq"
+            rm -f /tmp/sing-box-config.json.tmp
+            return 1
+        fi
+        if ! mv /tmp/sing-box-config.json.tmp /tmp/sing-box-config.json; then
+            echo "❌ Failed to replace sing-box config after cert path update"
+            return 1
+        fi
+        echo "✅ Certificate paths updated: $ACTUAL_CERT"
     }
     
     # 等待证书
@@ -387,7 +421,7 @@ echo ""
 echo "========================================="
 echo "✅ GTAGod Container v${VERSION} initialized"
 echo "📊 Caddy PID: $CADDY_PID"
-if [ -n "$SINGBOX_PID" ] && kill -0 $SINGBOX_PID 2>/dev/null; then
+if [ -n "$SINGBOX_PID" ] && kill -0 "$SINGBOX_PID" 2>/dev/null; then
     echo "📊 sing-box PID: $SINGBOX_PID"
 fi
 echo "========================================="
@@ -404,25 +438,29 @@ echo "========================================="
 
 CERT_MTIME=""
 if [ "$NEEDS_CERT" = "true" ] && [ -n "$ACTUAL_CERT" ] && [ -f "$ACTUAL_CERT" ]; then
-    CERT_MTIME=$(stat -c %Y "$ACTUAL_CERT" 2>/dev/null || echo "")
+    CERT_MTIME=$(stat -c %Y "$ACTUAL_CERT" 2>/dev/null || stat -f %m "$ACTUAL_CERT" 2>/dev/null || echo "")
 fi
 
 while true; do
     # 检查 Caddy 是否存活
-    if ! kill -0 $CADDY_PID 2>/dev/null; then
+    if ! kill -0 "$CADDY_PID" 2>/dev/null; then
         echo "❌ Caddy (PID $CADDY_PID) has exited unexpectedly!"
         echo "🔄 Exiting container to trigger restart..."
         exit 1
     fi
 
     # 检查 sing-box 是否存活（如果之前成功启动过）
-    if [ -n "$SINGBOX_PID" ] && ! kill -0 $SINGBOX_PID 2>/dev/null; then
+    if [ -n "$SINGBOX_PID" ] && ! kill -0 "$SINGBOX_PID" 2>/dev/null; then
         SINGBOX_RESTART_ATTEMPTS=$((SINGBOX_RESTART_ATTEMPTS + 1))
+        if [ "$SINGBOX_RESTART_ATTEMPTS" -gt "$SINGBOX_MAX_RESTART_ATTEMPTS" ]; then
+            echo "❌ sing-box exceeded max restart attempts ($SINGBOX_MAX_RESTART_ATTEMPTS), exiting container..."
+            exit 1
+        fi
         RESTART_DELAY=$(get_singbox_restart_delay "$SINGBOX_RESTART_ATTEMPTS")
-        echo "⚠️  sing-box (PID $SINGBOX_PID) has exited, attempting restart after ${RESTART_DELAY}s..."
+        echo "⚠️  sing-box (PID $SINGBOX_PID) has exited, attempting restart #${SINGBOX_RESTART_ATTEMPTS}/${SINGBOX_MAX_RESTART_ATTEMPTS} after ${RESTART_DELAY}s..."
         sleep "$RESTART_DELAY"
         start_singbox
-        if [ -n "$SINGBOX_PID" ] && kill -0 $SINGBOX_PID 2>/dev/null; then
+        if [ -n "$SINGBOX_PID" ] && kill -0 "$SINGBOX_PID" 2>/dev/null; then
             echo "✅ sing-box restarted successfully (PID $SINGBOX_PID)"
         else
             echo "❌ sing-box restart failed, will continue with backoff"
@@ -431,10 +469,11 @@ while true; do
 
     # 检查证书是否更新（自动重载 sing-box）
     if [ "$NEEDS_CERT" = "true" ] && [ -n "$ACTUAL_CERT" ] && [ -f "$ACTUAL_CERT" ]; then
-        NEW_MTIME=$(stat -c %Y "$ACTUAL_CERT" 2>/dev/null || echo "")
+        NEW_MTIME=$(stat -c %Y "$ACTUAL_CERT" 2>/dev/null || stat -f %m "$ACTUAL_CERT" 2>/dev/null || echo "")
         if [ -n "$NEW_MTIME" ] && [ -n "$CERT_MTIME" ] && [ "$NEW_MTIME" != "$CERT_MTIME" ]; then
             echo "🔄 Certificate updated, reloading sing-box..."
             CERT_MTIME="$NEW_MTIME"
+            update_cert_paths
             if [ -n "$SINGBOX_PID" ] && kill -0 "$SINGBOX_PID" 2>/dev/null; then
                 if reload_singbox; then
                     echo "✅ sing-box reloaded with new certificate"
