@@ -23,6 +23,10 @@ on:
         type: boolean
         default: false
 
+concurrency:
+  group: docker-build-${{ github.ref }}
+  cancel-in-progress: true
+
 # =========================================
 # GTAGod v4.1.1 - sing-box 1.13+ 统一架构
 # =========================================
