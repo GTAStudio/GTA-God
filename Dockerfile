@@ -91,7 +91,7 @@ FROM alpine:3.23
 # 元数据
 LABEL maintainer="gtagod" \
       description="GTAGod - sing-box 1.13+ (naive + anytls + anyreality) with Caddy L4" \
-    version="4.1.1"
+      version="4.1.1"
 
 # 一次性安装所有依赖并创建目录，减少镜像层
 RUN apk add --no-cache \

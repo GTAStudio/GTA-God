@@ -158,6 +158,7 @@ CERT_WAIT_MAX="${CERT_WAIT_MAX:-180}"
 CERT_RETRY_INTERVAL="${CERT_RETRY_INTERVAL:-30}"
 CERT_RETRY_MAX="${CERT_RETRY_MAX:-10}"
 SINGBOX_RESTART_ATTEMPTS=0
+SINGBOX_MAX_RESTART_ATTEMPTS=10
 
 ensure_singbox_log_forwarder() {
     mkdir -p /var/log/sing-box
@@ -451,8 +452,12 @@ while true; do
     # 检查 sing-box 是否存活（如果之前成功启动过）
     if [ -n "$SINGBOX_PID" ] && ! kill -0 "$SINGBOX_PID" 2>/dev/null; then
         SINGBOX_RESTART_ATTEMPTS=$((SINGBOX_RESTART_ATTEMPTS + 1))
+        if [ "$SINGBOX_RESTART_ATTEMPTS" -gt "$SINGBOX_MAX_RESTART_ATTEMPTS" ]; then
+            echo "❌ sing-box exceeded max restart attempts ($SINGBOX_MAX_RESTART_ATTEMPTS), exiting container..."
+            exit 1
+        fi
         RESTART_DELAY=$(get_singbox_restart_delay "$SINGBOX_RESTART_ATTEMPTS")
-        echo "⚠️  sing-box (PID $SINGBOX_PID) has exited, attempting restart after ${RESTART_DELAY}s..."
+        echo "⚠️  sing-box (PID $SINGBOX_PID) has exited, attempting restart #${SINGBOX_RESTART_ATTEMPTS}/${SINGBOX_MAX_RESTART_ATTEMPTS} after ${RESTART_DELAY}s..."
         sleep "$RESTART_DELAY"
         start_singbox
         if [ -n "$SINGBOX_PID" ] && kill -0 "$SINGBOX_PID" 2>/dev/null; then
@@ -468,6 +473,7 @@ while true; do
         if [ -n "$NEW_MTIME" ] && [ -n "$CERT_MTIME" ] && [ "$NEW_MTIME" != "$CERT_MTIME" ]; then
             echo "🔄 Certificate updated, reloading sing-box..."
             CERT_MTIME="$NEW_MTIME"
+            update_cert_paths
             if [ -n "$SINGBOX_PID" ] && kill -0 "$SINGBOX_PID" 2>/dev/null; then
                 if reload_singbox; then
                     echo "✅ sing-box reloaded with new certificate"
@@ -486,5 +492,6 @@ while true; do
         fi
     fi
 
-    sleep 10
+    sleep 10 &
+    wait $!
 done
