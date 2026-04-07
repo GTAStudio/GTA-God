@@ -6,10 +6,10 @@
 
 ## 🎉 v4.1 更新
 
-- **依赖全面升级** - Go 1.26, Alpine 3.23, xcaddy v0.4.5, Caddy v2.11.2, sing-box 1.13.2
+- **依赖全面升级** - Go 1.26, Alpine 3.23, xcaddy v0.4.5, Caddy v2.11.2, sing-box 1.13.6
 - **sing-box 1.13+ 原生 naive inbound** - 移除 Caddy forwardproxy 依赖
 - **kernel_tx (kTLS)** - 启用内核级 TLS 发送加速，降低 CPU 开销
-- **配置模板修复** - 兼容 sing-box 1.13.2，并迁移到 1.14 兼容 DNS 写法
+- **配置模板修复** - 兼容 sing-box 1.13.6，并迁移到 1.14 兼容 DNS 写法
 - **容器稳定性提升** - 修复多个启动问题
 
 ## 特性
@@ -198,12 +198,12 @@ chmod +x run.sh
   - Alpine 3.21 → **Alpine 3.23** (apk-tools v3、curl HTTP/3、GCC 15)
   - xcaddy v0.4.4 → **xcaddy v0.4.5** (bug 修复)
   - Caddy → **v2.11.2** (补充 bugfix 与安全修复)
-  - sing-box → **1.13.2** (musl 版本，原生 naive inbound)
+  - sing-box → **1.13.6** (musl 版本，原生 naive inbound)
 - ⚡ **kTLS (kernel_tx)**:
   - 默认关闭 (`ENABLE_KTLS="false"`)，避免容器内缺少 `/lib/modules` 导致握手失败
   - 开启时自动在宿主机执行 `modprobe tls` 并挂载 `/lib/modules` 到容器
   - 要求宿主机内核 >= 4.13 且编译了 `CONFIG_TLS` 模块
-- 🐛 **修复 sing-box 1.13.2 / 1.14 配置兼容性**:
+- 🐛 **修复 sing-box 1.13.6 / 1.14 配置兼容性**:
   - 移除废弃的 `sniff` 和 `sniff_override_destination` 字段 (1.11.0 废弃，1.13.x 已移除)
   - 将废弃的 `dns.rules.outbound` 迁移到 `route.default_domain_resolver`，避免 1.14 升级时报错
   - 补全所有模板的 `outbounds` 配置

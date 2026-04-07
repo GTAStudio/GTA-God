@@ -1,25 +1,33 @@
 {
   "log": {
-    "level": "info",
+    "level": "{{SINGBOX_LOG_LEVEL}}",
     "timestamp": true
   },
   "dns": {
     "servers": [
       {
-        "tag": "doh-cf",
-        "address": "https://1.1.1.1/dns-query",
-        "detour": "direct"
+        "type": "https",
+        "tag": "doh-primary",
+        "server": "{{DNS_PRIMARY_SERVER}}",
+        "server_port": 443
       },
       {
-        "tag": "doh-google",
-        "address": "https://8.8.8.8/dns-query",
-        "detour": "direct"
+        "type": "https",
+        "tag": "doh-secondary",
+        "server": "{{DNS_SECONDARY_SERVER}}",
+        "server_port": 443
+      },
+      {
+        "type": "https",
+        "tag": "doh-tertiary",
+        "server": "{{DNS_TERTIARY_SERVER}}",
+        "server_port": 443
       }
     ],
     "strategy": "ipv4_only"
   },
   "route": {
-    "default_domain_resolver": "doh-cf"
+    "default_domain_resolver": "doh-primary"
   },
   "inbounds": [
     {

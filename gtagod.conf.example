@@ -112,6 +112,17 @@ ANYREALITY_SHORT_ID="a1b2c3d4e5f67890"
 # 默认使用 zerossl
 # FORCE_ACME_CA="letsencrypt"
 
+# sing-box 日志级别
+# 生产环境建议使用 warn，排障时切换为 info 或 debug
+SINGBOX_LOG_LEVEL="info"
+
+# sing-box DNS 上游
+# 使用新的 typed HTTPS DNS server 写法生成配置，兼容 sing-box 1.14+
+# 如你沿用旧配置里的 DNS_*_URL，run.sh 仍会自动兼容到新写法
+DNS_PRIMARY_SERVER="1.1.1.1"
+DNS_SECONDARY_SERVER="8.8.8.8"
+DNS_TERTIARY_SERVER="9.9.9.9"
+
 # =========================================
 # 网络配置 (可选)
 # =========================================

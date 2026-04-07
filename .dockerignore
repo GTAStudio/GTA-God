@@ -1,0 +1,47 @@
+# Git
+.git/
+.github/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 日志文件
+*.log
+
+# 部署脚本（不需要包含在镜像中）
+deploy.sh
+run*.sh
+build-and-push.sh
+
+# 配置模板（部署脚本使用，不是镜像需要的）
+*.example
+
+# 文档
+README.md
+LICENSE
+
+# 临时文件和备份
+*.tmp
+*.bak
+*.old
+*.backup.*
+*.rar
+*.zip
+*.tar.gz
+
+# 本地配置目录
+caddy/
+singbox/
+certificates/
+
+# 环境文件
+*.env
+config.txt

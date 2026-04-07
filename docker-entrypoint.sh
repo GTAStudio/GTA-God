@@ -67,6 +67,53 @@ if ! cp /etc/sing-box/config.json /tmp/sing-box-config.json; then
     exit 1
 fi
 
+migrate_legacy_dns_servers() {
+    if ! jq -e 'any(.dns.servers[]?; (.address? != null) and (.address | type == "string"))' /tmp/sing-box-config.json >/dev/null 2>&1; then
+        echo "✅ sing-box DNS server format is current"
+        return 0
+    fi
+
+    echo "⚠️  Detected legacy sing-box DNS server format, migrating to typed HTTPS servers..."
+
+    if ! jq '
+        def migrate_dns_server:
+          if (.address? | type == "string") and (.address | startswith("https://")) then
+            (.address | capture("^https://(?<host>[^/:]+)(?::(?<port>[0-9]+))?(?<path>/.*)?$")) as $parts
+            | del(.address, .detour)
+            | .type = "https"
+            | .server = $parts.host
+            | .server_port = (($parts.port // "443") | tonumber)
+            | if ($parts.path // "") != "" and ($parts.path // "") != "/dns-query" then .path = $parts.path else . end
+          else
+            .
+          end;
+        .dns.servers |= map(migrate_dns_server)
+    ' /tmp/sing-box-config.json > /tmp/sing-box-config.json.migrated; then
+        echo "❌ Failed to migrate legacy DNS server format"
+        rm -f /tmp/sing-box-config.json.migrated
+        return 1
+    fi
+
+    if jq -e 'any(.dns.servers[]?; .address? != null)' /tmp/sing-box-config.json.migrated >/dev/null 2>&1; then
+        echo "❌ Found unsupported legacy DNS server entries after migration"
+        rm -f /tmp/sing-box-config.json.migrated
+        return 1
+    fi
+
+    if ! mv /tmp/sing-box-config.json.migrated /tmp/sing-box-config.json; then
+        echo "❌ Failed to replace sing-box config after DNS migration"
+        rm -f /tmp/sing-box-config.json.migrated
+        return 1
+    fi
+
+    echo "✅ Legacy sing-box DNS servers migrated to typed HTTPS format"
+    return 0
+}
+
+if ! migrate_legacy_dns_servers; then
+    exit 1
+fi
+
 # =========================================
 # 检测配置类型 (使用 jq 精确解析 JSON)
 # =========================================
