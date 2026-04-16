@@ -2,7 +2,7 @@
 set -e
 
 CADDY_VERSION="v2.11.2"
-SINGBOX_VERSION="1.13.6"
+SINGBOX_VERSION="1.13.8"
 
 # 配置 - 修改为你的 Docker Hub 用户名
 DOCKERHUB_USERNAME="aizhihuxiao"
