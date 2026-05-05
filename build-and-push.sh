@@ -4,7 +4,7 @@ set -e
 CADDY_VERSION="v2.11.2"
 GO_VERSION="1.26"
 ALPINE_VERSION="3.23"
-SINGBOX_VERSION="1.13.9"
+SINGBOX_VERSION="1.13.11"
 
 # 配置 - 修改为你的 Docker Hub 用户名
 DOCKERHUB_USERNAME="aizhihuxiao"

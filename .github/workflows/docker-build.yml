@@ -14,9 +14,9 @@ on:
         required: false
         default: 'v2.11.2'
       singbox_version:
-        description: 'sing-box version (e.g. 1.13.9)'
+        description: 'sing-box version (e.g. 1.13.11)'
         required: false
-        default: '1.13.9'
+        default: '1.13.11'
       alpine_version:
         description: 'Alpine base image version (default: 3.23)'
         required: false
@@ -89,7 +89,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             CADDY_VERSION=${{ github.event.inputs.caddy_version || 'v2.11.2' }}
-            SINGBOX_VERSION=${{ github.event.inputs.singbox_version || '1.13.9' }}
+            SINGBOX_VERSION=${{ github.event.inputs.singbox_version || '1.13.11' }}
             ALPINE_VERSION=${{ github.event.inputs.alpine_version || '3.23' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

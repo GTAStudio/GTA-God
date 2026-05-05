@@ -18,7 +18,7 @@
 #   - Alpine: 3.23 (当前 Docker Hub latest 稳定版)
 #   - xcaddy: v0.4.5
 #   - Caddy: v2.11.2
-#   - sing-box: 1.13.9
+#   - sing-box: 1.13.11
 #
 # =========================================
 
@@ -33,7 +33,7 @@ FROM golang:${GO_VERSION}-alpine${ALPINE_VERSION} AS builder
 # Caddy 2.11+ 需要 Go 1.25+ 编译
 ARG CADDY_VERSION=v2.11.2
 ARG XCADDY_VERSION=v0.4.5
-ARG SINGBOX_VERSION=1.13.9
+ARG SINGBOX_VERSION=1.13.11
 
 # 固定使用镜像内稳定 Go 工具链，避免自动下载带来的不可重复构建
 ENV GOTOOLCHAIN=local
