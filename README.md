@@ -6,10 +6,10 @@
 
 ## 🎉 v4.1 更新
 
-- **依赖全面升级** - Go 1.26, Alpine 3.23, xcaddy v0.4.5, Caddy v2.11.2, sing-box 1.13.8
+- **依赖全面升级** - Go 1.26, Alpine 3.23, xcaddy v0.4.5, Caddy v2.11.2, sing-box 1.13.9
 - **sing-box 1.13+ 原生 naive inbound** - 移除 Caddy forwardproxy 依赖
 - **kernel_tx (kTLS)** - 启用内核级 TLS 发送加速，降低 CPU 开销
-- **配置模板修复** - 兼容 sing-box 1.13.8，并迁移到 1.14 兼容 DNS 写法
+- **配置模板修复** - 兼容 sing-box 1.13.9，并迁移到 1.14 兼容 DNS 写法
 - **容器稳定性提升** - 修复多个启动问题
 
 ## 特性
@@ -68,6 +68,8 @@
 
 - `run.sh` 默认仍会按这个项目的既有部署假设工作：自动安装 Docker、关闭宿主机防火墙、关闭宿主机 IPv6、调整 DNS 到 IPv4 优先，并启动 `watchtower`。
 - `run.sh` 默认也会应用宿主机网络优化，包括 BBR 和一组 TCP/sysctl 调优，以性能和稳定性优先。
+- Docker 容器共享宿主机 Linux 内核；镜像基础层只能更新容器内 Alpine 用户态包。若你要修复 Linux 内核漏洞，必须升级宿主机系统内核并重启 VPS。
+- Dockerfile 已固定到当前最新稳定 Alpine 3.23，并在 builder/runtime 阶段执行 `apk upgrade --no-cache`，让镜像构建时拉取该发行版最新安全修复。
 - 显式开关还保留着；如果你确实有特殊环境，可以再通过 `HOST_IPV6_TUNING`、`HOST_DNS_TUNING`、`HOST_NETWORK_OPTIMIZATION`、`HOST_FIREWALL_MANAGEMENT`、`PREPARE_HOST_SYSTEM`、`AUTO_INSTALL_DOCKER`、`ENABLE_WATCHTOWER` 手动改回去。
 - `gtagod.conf` 应按纯 `KEY=value` 配置文件维护，不要写 shell 语句、命令替换或函数，也不要直接复用来路不明的配置。
 - 部署过程中会把域名、Token、认证信息和 Reality 密钥写入生成配置；`gtagod.conf`、`caddy/`、`singbox/` 目录都应视为敏感数据。
@@ -144,6 +146,7 @@ chmod +x run.sh
 可在 [gtagod.conf.example](gtagod.conf.example) 中配置：
 
 - `PREPARE_HOST_SYSTEM`：是否初始化宿主机时区、依赖和时间同步，默认开启。
+- 若系统升级包含 Linux 内核更新，必须重启宿主机后才会生效；`run.sh` 会提示 reboot-required 标记。
 - `AUTO_INSTALL_DOCKER`：未安装 Docker 时是否自动安装，默认开启。
 - `HOST_IPV6_TUNING`：是否真正修改宿主机 IPv6 配置，默认开启。
 - `HOST_DNS_TUNING`：是否修改宿主机 `/etc/gai.conf` 和 `/etc/resolv.conf`，默认开启。
@@ -195,15 +198,15 @@ chmod +x run.sh
 ### v4.1.0 (2026-01-01)
 - 🔧 **依赖升级到最新稳定版**:
   - Go 1.24 → **Go 1.26** (稳定工具链，默认安全与性能优化)
-  - Alpine 3.21 → **Alpine 3.23** (apk-tools v3、curl HTTP/3、GCC 15)
+  - Alpine 3.21 → **Alpine 3.23** (当前 Docker Hub latest 稳定版，构建时执行 apk upgrade)
   - xcaddy v0.4.4 → **xcaddy v0.4.5** (bug 修复)
   - Caddy → **v2.11.2** (补充 bugfix 与安全修复)
-  - sing-box → **1.13.8** (musl 版本，原生 naive inbound)
+  - sing-box → **1.13.9** (musl 版本，原生 naive inbound)
 - ⚡ **kTLS (kernel_tx)**:
   - 默认关闭 (`ENABLE_KTLS="false"`)，避免容器内缺少 `/lib/modules` 导致握手失败
   - 开启时自动在宿主机执行 `modprobe tls` 并挂载 `/lib/modules` 到容器
   - 要求宿主机内核 >= 4.13 且编译了 `CONFIG_TLS` 模块
-- 🐛 **修复 sing-box 1.13.8 / 1.14 配置兼容性**:
+- 🐛 **修复 sing-box 1.13.9 / 1.14 配置兼容性**:
   - 移除废弃的 `sniff` 和 `sniff_override_destination` 字段 (1.11.0 废弃，1.13.x 已移除)
   - 将废弃的 `dns.rules.outbound` 迁移到 `route.default_domain_resolver`，避免 1.14 升级时报错
   - 补全所有模板的 `outbounds` 配置

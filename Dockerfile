@@ -2,7 +2,7 @@
 # =========================================
 # GTAGod Dockerfile - sing-box 1.13+ 统一架构
 # 版本: 4.1.1
-# 更新: 2026-03-01
+# 更新: 2026-05-05
 # =========================================
 #
 # 此版本使用 sing-box 1.13+ 原生 naive inbound
@@ -13,30 +13,34 @@
 #   - Caddy: L4 SNI 分流 + ACME 证书申请
 #   - sing-box 1.13+: naive + anytls + anyreality
 #
-# 依赖版本 (2026-03-01 更新):
+# 依赖版本 (2026-05-05 更新):
 #   - Go: 1.26 (sing-box 1.13+ 需要 Go 1.24+)
-#   - Alpine: 3.23 (包含 Go 1.26, GCC 15, apk-tools v3)
+#   - Alpine: 3.23 (当前 Docker Hub latest 稳定版)
 #   - xcaddy: v0.4.5
 #   - Caddy: v2.11.2
-#   - sing-box: 1.13.8
+#   - sing-box: 1.13.9
 #
 # =========================================
 
+ARG GO_VERSION=1.26
+ARG ALPINE_VERSION=3.23
+
 # 构建阶段 - 使用 Alpine 基础镜像
-# Go 1.26 稳定版，遵循稳定工具链实践
-FROM golang:1.26-alpine AS builder
+# Go 1.26 + Alpine 3.23 稳定版，遵循稳定工具链实践
+FROM golang:${GO_VERSION}-alpine${ALPINE_VERSION} AS builder
 
 # 构建参数 - sing-box 1.13+ 支持 naive inbound
 # Caddy 2.11+ 需要 Go 1.25+ 编译
 ARG CADDY_VERSION=v2.11.2
 ARG XCADDY_VERSION=v0.4.5
-ARG SINGBOX_VERSION=1.13.8
+ARG SINGBOX_VERSION=1.13.9
 
 # 固定使用镜像内稳定 Go 工具链，避免自动下载带来的不可重复构建
 ENV GOTOOLCHAIN=local
 
 # 安装构建依赖
-RUN apk add --no-cache git ca-certificates curl jq
+RUN apk upgrade --no-cache && \
+    apk add --no-cache git ca-certificates curl jq
 
 # 安装 xcaddy
 RUN --mount=type=cache,target=/root/.cache/go-build \
@@ -84,9 +88,9 @@ RUN set -ex && \
     /usr/bin/sing-box version && \
     rm -rf /tmp/sing-box*
 
-# 运行阶段 - 使用 Alpine 3.23 (2025-12 发布)
-# 新特性：apk-tools v3, curl HTTP/3 支持, GCC 15
-FROM alpine:3.23
+# 运行阶段 - 使用 Alpine 3.23 (当前 Docker Hub latest 稳定版)
+# 构建时执行 apk upgrade，确保基础包使用该发行版最新安全修复
+FROM alpine:${ALPINE_VERSION}
 
 # 元数据
 LABEL maintainer="gtagod" \
@@ -94,7 +98,8 @@ LABEL maintainer="gtagod" \
       version="4.1.1"
 
 # 一次性安装所有依赖并创建目录，减少镜像层
-RUN apk add --no-cache \
+RUN apk upgrade --no-cache && \
+    apk add --no-cache \
         ca-certificates \
         libcap \
         tzdata \

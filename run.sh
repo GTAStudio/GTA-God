@@ -1002,6 +1002,12 @@ if [ "$prepare_host_system" = "true" ]; then
   log_info "安装系统依赖..."
   apt update && apt upgrade -y
   apt install -y curl ca-certificates gnupg
+  if [ -f /var/run/reboot-required ] || [ -f /run/reboot-required ]; then
+    log_warning "检测到宿主机需要重启，Linux 内核/系统安全更新只有重启后才会生效"
+    log_warning "建议重启服务器后再继续部署或重启已运行的容器"
+  else
+    log_info "如本次系统升级包含 Linux 内核更新，请重启宿主机让安全修复生效"
+  fi
 
   # 时间同步：优先 timedatectl，回退 ntpdate/ntpsec-ntpdate
   log_info "同步系统时间..."
@@ -1889,6 +1895,7 @@ MPTCP (tcp_multi_path): ${tcp_multi_path}
 宿主机 DNS 调整: ${host_dns_tuning}
 宿主机网络优化: ${host_network_optimization}
 宿主机防火墙管理: ${host_firewall_management}
+宿主机内核版本: $(uname -r 2>/dev/null || echo unknown)
 Watchtower 自动更新: ${enable_watchtower}
 容器 GOMEMLIMIT: ${container_gomemlimit}
 容器 PIDs 限制: ${container_pids_limit}

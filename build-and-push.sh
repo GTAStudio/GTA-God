@@ -2,7 +2,9 @@
 set -e
 
 CADDY_VERSION="v2.11.2"
-SINGBOX_VERSION="1.13.8"
+GO_VERSION="1.26"
+ALPINE_VERSION="3.23"
+SINGBOX_VERSION="1.13.9"
 
 # 配置 - 修改为你的 Docker Hub 用户名
 DOCKERHUB_USERNAME="aizhihuxiao"
@@ -23,8 +25,8 @@ docker login
 # 拉取最新基础镜像
 echo ""
 echo "📥 拉取最新基础镜像..."
-docker pull golang:1.26-alpine
-docker pull alpine:3.23
+docker pull golang:${GO_VERSION}-alpine${ALPINE_VERSION}
+docker pull alpine:${ALPINE_VERSION}
 
 # 构建多架构镜像（需要 buildx）
 echo ""
@@ -45,6 +47,8 @@ docker buildx create --name naiveproxy-builder --use 2>/dev/null || docker build
 # 构建并推送
 docker buildx build ${BUILD_ARGS} \
     --platform linux/amd64,linux/arm64 \
+    --build-arg GO_VERSION=${GO_VERSION} \
+    --build-arg ALPINE_VERSION=${ALPINE_VERSION} \
     --build-arg CADDY_VERSION=${CADDY_VERSION} \
     --build-arg SINGBOX_VERSION=${SINGBOX_VERSION} \
     -t ${IMAGE_NAME}:latest \

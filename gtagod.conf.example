@@ -135,6 +135,7 @@ DISABLE_IPV6="true"
 
 # 是否初始化宿主机系统
 # 开启后会修改时区、安装基础依赖并尝试同步时间
+# 若升级了 Linux 内核，必须重启宿主机后安全修复才会生效
 # 可选值: true, false
 # 默认: true
 PREPARE_HOST_SYSTEM="true"
