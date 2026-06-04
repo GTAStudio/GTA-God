@@ -4,51 +4,52 @@
 
 # =========================================
 # GTAGod Docker Entrypoint
-# 版本: 4.1.1
-# 更新: 2026-01-01
+# 版本: 0.0.1
+# 更新: 2026-06-04
 # =========================================
 # 
-# sing-box 1.13+ 统一架构:
-#   - Caddy: L4 SNI 分流 + ACME 证书申请
-#   - sing-box: naive + anytls + anyreality
+# GTACore (Rust) 统一架构:
+#   - gtagate (Rust): L4 SNI 分流 + ACME 证书申请
+#   - gtacore (Rust): naive + anytls + anyreality (替代 sing-box)
 #
 # 支持的部署模式:
-#   - NaiveProxy Only (sing-box naive inbound)
-#   - NaiveProxy + AnyTLS (sing-box naive + anytls)
-#   - NaiveProxy + AnyReality (sing-box naive + anyreality)
-#   - L4 多协议 (Layer4 SNI 分流, 全部 sing-box 处理)
+#   - NaiveProxy Only (gtacore naive inbound)
+#   - NaiveProxy + AnyTLS (gtacore naive + anytls)
+#   - NaiveProxy + AnyReality (gtacore naive + anyreality)
+#   - L4 多协议 (Layer4 SNI 分流, 全部 gtacore 处理)
 #
 # =========================================
 
-VERSION="4.1.1"
+VERSION="0.0.1"
 SINGBOX_LOG_FILE="/var/log/sing-box/sing-box.log"
+GTAGATE_CONFIG="/etc/gtagate/config.json"
 
 echo "========================================="
 echo "GTAGod Container v${VERSION}"
-echo "sing-box 1.13+ unified architecture"
-echo "Starting Caddy + sing-box services..."
+echo "GTACore (Rust) unified architecture"
+echo "Starting gtagate + gtacore services..."
 echo "========================================="
 
 # =========================================
 # 检查配置文件
 # =========================================
-if [ ! -f "/etc/caddy/Caddyfile" ]; then
-    echo "❌ ERROR: /etc/caddy/Caddyfile not found!"
-    echo "Please mount your Caddyfile to /etc/caddy/Caddyfile"
+if [ ! -f "$GTAGATE_CONFIG" ]; then
+    echo "❌ ERROR: $GTAGATE_CONFIG not found!"
+    echo "Please mount your gtagate config to $GTAGATE_CONFIG"
     exit 1
 fi
 
-echo "📝 Caddyfile found, validating..."
+echo "📝 gtagate config found, validating JSON..."
 
-# 验证 Caddyfile 格式
-if caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/tmp/caddy-validate.log 2>&1; then
-    echo "✅ Caddyfile validation passed"
+# 验证 JSON 格式
+if jq empty "$GTAGATE_CONFIG" >/tmp/gtagate-validate.log 2>&1; then
+    echo "✅ gtagate config validation passed"
 else
-    echo "❌ ERROR: Caddyfile validation failed!"
-    cat /tmp/caddy-validate.log
+    echo "❌ ERROR: gtagate config validation failed!"
+    cat /tmp/gtagate-validate.log
     exit 1
 fi
-rm -f /tmp/caddy-validate.log
+rm -f /tmp/gtagate-validate.log
 
 # =========================================
 # 检查 sing-box 配置
@@ -143,13 +144,19 @@ if jq -e '.inbounds[]? | select(.tls?.certificate_path != null)' /tmp/sing-box-c
     echo "📋 Certificate required for TLS inbounds"
 fi
 
+if [ "$HAS_NAIVE" = "true" ] || [ "$HAS_ANYTLS" = "true" ] || [ "$HAS_ANYREALITY" = "true" ]; then
+    touch /tmp/gtagod-singbox-required
+else
+    rm -f /tmp/gtagod-singbox-required
+fi
+
 # =========================================
 # 信号处理 (优雅退出)
 # =========================================
 cleanup() {
     echo "🛑 Received stop signal, shutting down gracefully..."
     # Send SIGTERM to all managed processes
-    for _pid_var in SINGBOX_PID CADDY_PID LOG_TAIL_PID; do
+    for _pid_var in SINGBOX_PID GATE_PID LOG_TAIL_PID; do
         eval "_pid=\$$_pid_var"
         if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null; then
             echo "🛑 Stopping $_pid_var (PID $_pid)..."
@@ -160,7 +167,7 @@ cleanup() {
     _timeout=10
     while [ $_timeout -gt 0 ]; do
         _any_alive=false
-        for _pid_var in SINGBOX_PID CADDY_PID; do
+        for _pid_var in SINGBOX_PID GATE_PID; do
             eval "_pid=\$$_pid_var"
             if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null; then
                 _any_alive=true
@@ -171,7 +178,7 @@ cleanup() {
         _timeout=$((_timeout - 1))
     done
     # Force kill any remaining processes
-    for _pid_var in SINGBOX_PID CADDY_PID LOG_TAIL_PID; do
+    for _pid_var in SINGBOX_PID GATE_PID LOG_TAIL_PID; do
         eval "_pid=\$$_pid_var"
         if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null; then
             echo "⚠️  Force killing $_pid_var (PID $_pid)..."
@@ -186,17 +193,17 @@ cleanup() {
 trap cleanup SIGTERM SIGINT SIGQUIT
 
 # =========================================
-# 启动 Caddy (用于 L4 分流和证书申请)
+# 启动 gtagate (用于 L4 分流和证书申请)
 # =========================================
-echo "🚀 Starting Caddy..."
-caddy run --config /etc/caddy/Caddyfile --adapter caddyfile &
-CADDY_PID=$!
+echo "🚀 Starting gtagate..."
+gtagate "$GTAGATE_CONFIG" &
+GATE_PID=$!
 sleep 2
-if ! kill -0 "$CADDY_PID" 2>/dev/null; then
-    echo "❌ Caddy failed to start (exited within 2s)"
+if ! kill -0 "$GATE_PID" 2>/dev/null; then
+    echo "❌ gtagate failed to start (exited within 2s)"
     exit 1
 fi
-echo "✅ Caddy started with PID: $CADDY_PID"
+echo "✅ gtagate started with PID: $GATE_PID"
 
 # =========================================
 # 等待证书后启动 sing-box
@@ -206,6 +213,16 @@ CERT_RETRY_INTERVAL="${CERT_RETRY_INTERVAL:-30}"
 CERT_RETRY_MAX="${CERT_RETRY_MAX:-10}"
 SINGBOX_RESTART_ATTEMPTS=0
 SINGBOX_MAX_RESTART_ATTEMPTS=10
+GTACORE_TOKEN_FILE="${GTACORE_TOKEN_FILE:-/tmp/gtacore-token}"
+
+# gtacore 控制面 (127.0.0.1:19810) 需要 token；仅 loopback，容器不暴露该端口
+ensure_gtacore_token() {
+    if [ -s "$GTACORE_TOKEN_FILE" ]; then
+        return 0
+    fi
+    head -c 32 /dev/urandom | base64 | tr -d '\n' > "$GTACORE_TOKEN_FILE"
+    chmod 600 "$GTACORE_TOKEN_FILE"
+}
 
 ensure_singbox_log_forwarder() {
     mkdir -p /var/log/sing-box
@@ -228,42 +245,35 @@ stop_singbox() {
 }
 
 reload_singbox() {
-    if [ -z "$SINGBOX_PID" ] || ! kill -0 "$SINGBOX_PID" 2>/dev/null; then
-        return 1
-    fi
-
+    # gtacore 无 SIGHUP 热重载，证书更新需重启进程
     if ! validate_singbox_config; then
-        echo "❌ Skipping sing-box reload because config validation failed"
+        echo "❌ Skipping gtacore reload because config validation failed"
         return 1
     fi
 
-    if ! kill -HUP "$SINGBOX_PID" 2>/dev/null; then
-        echo "❌ Failed to send HUP to sing-box"
-        return 1
-    fi
+    stop_singbox
+    sleep 1
+    start_singbox
 
-    sleep 3
-
-    if kill -0 "$SINGBOX_PID" 2>/dev/null; then
-        echo "✅ sing-box reloaded successfully"
+    if [ -n "$SINGBOX_PID" ] && kill -0 "$SINGBOX_PID" 2>/dev/null; then
+        echo "✅ gtacore reloaded (restarted) successfully"
         return 0
     fi
 
-    echo "❌ sing-box exited after reload signal"
-    SINGBOX_PID=""
+    echo "❌ gtacore failed to start after reload"
     return 1
 }
 
 validate_singbox_config() {
     VALIDATE_LOG="/tmp/sing-box-check.log"
 
-    if sing-box check -c /tmp/sing-box-config.json >"$VALIDATE_LOG" 2>&1; then
-        echo "✅ sing-box config validation passed"
+    if gtacore sing-box check -c /tmp/sing-box-config.json >"$VALIDATE_LOG" 2>&1; then
+        echo "✅ gtacore config validation passed"
         rm -f "$VALIDATE_LOG"
         return 0
     fi
 
-    echo "❌ sing-box config validation failed!"
+    echo "❌ gtacore config validation failed!"
     cat "$VALIDATE_LOG"
     rm -f "$VALIDATE_LOG"
     return 1
@@ -285,21 +295,23 @@ start_singbox() {
     fi
 
     echo ""
-    echo "🚀 Starting sing-box..."
+    echo "🚀 Starting gtacore..."
 
     if ! validate_singbox_config; then
-        echo "⚠️  Skipping sing-box start until config is fixed..."
+        echo "⚠️  Skipping gtacore start until config is fixed..."
         return 1
     fi
 
+    ensure_gtacore_token
     ensure_singbox_log_forwarder
-    sing-box run -c /tmp/sing-box-config.json >> "$SINGBOX_LOG_FILE" 2>&1 &
+    gtacore run --config /tmp/sing-box-config.json --token-file "$GTACORE_TOKEN_FILE" >> "$SINGBOX_LOG_FILE" 2>&1 &
     SINGBOX_PID=$!
-    echo "✅ sing-box started with PID: $SINGBOX_PID"
+    echo "✅ gtacore started with PID: $SINGBOX_PID"
 
     sleep 3
     if kill -0 "$SINGBOX_PID" 2>/dev/null; then
         SINGBOX_RESTART_ATTEMPTS=0
+        touch /tmp/gtagod-singbox-started
         echo "✅ sing-box is running successfully!"
         
         # 显示启用的功能
@@ -317,7 +329,7 @@ start_singbox() {
         tail -30 "$SINGBOX_LOG_FILE" 2>/dev/null || echo "No log file"
         stop_singbox
         echo ""
-        echo "⚠️  Continuing with Caddy only..."
+        echo "⚠️  Continuing with gtagate only..."
     fi
 }
 
@@ -395,7 +407,7 @@ if [ "$NEEDS_CERT" = "true" ]; then
     fi
     
     if [ "$CERT_FOUND" = "false" ]; then
-        echo "⏳ No existing cert found, waiting for Caddy to request certificate..."
+        echo "⏳ No existing cert found, waiting for gtagate to request certificate..."
         sleep 10
         WAIT_COUNT=10
     fi
@@ -467,18 +479,18 @@ fi
 echo ""
 echo "========================================="
 echo "✅ GTAGod Container v${VERSION} initialized"
-echo "📊 Caddy PID: $CADDY_PID"
+echo "📊 gtagate PID: $GATE_PID"
 if [ -n "$SINGBOX_PID" ] && kill -0 "$SINGBOX_PID" 2>/dev/null; then
-    echo "📊 sing-box PID: $SINGBOX_PID"
+    echo "📊 gtacore PID: $SINGBOX_PID"
 fi
 echo "========================================="
 
-# 保持容器运行，同时监控 Caddy 和 sing-box
+# 保持容器运行，同时监控 gtagate 和 sing-box
 # =========================================
 # 进程监控 + 证书自动重载
 # =========================================
 # 每 10 秒检查一次:
-#   1. Caddy 是否存活
+#   1. gtagate 是否存活
 #   2. sing-box 是否存活（如果应该运行的话）
 #   3. 证书文件是否更新（自动重载 sing-box）
 # =========================================
@@ -489,9 +501,9 @@ if [ "$NEEDS_CERT" = "true" ] && [ -n "$ACTUAL_CERT" ] && [ -f "$ACTUAL_CERT" ];
 fi
 
 while true; do
-    # 检查 Caddy 是否存活
-    if ! kill -0 "$CADDY_PID" 2>/dev/null; then
-        echo "❌ Caddy (PID $CADDY_PID) has exited unexpectedly!"
+    # 检查 gtagate 是否存活
+    if ! kill -0 "$GATE_PID" 2>/dev/null; then
+        echo "❌ gtagate (PID $GATE_PID) has exited unexpectedly!"
         echo "🔄 Exiting container to trigger restart..."
         exit 1
     fi

@@ -24,12 +24,18 @@
 !healthcheck.sh
 
 # =========================================
+# 预构建二进制 (gtacore: Rust sing-box 替代，含内嵌 libutls)
+# =========================================
+!bin/
+!bin/gtacore
+
+# =========================================
 # 部署脚本和配置模板
 # =========================================
 !run.sh
+!setup-warp.sh
 !build-and-push.sh
 !gtagod.conf.example
-!Caddyfile.*.example
 !singbox-config.*.example
 
 # =========================================
