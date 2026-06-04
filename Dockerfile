@@ -16,13 +16,13 @@
 #   - Rust: 1.96 (edition 2024，需要 rustc >= 1.85)
 #   - gtagate: 本仓库 gateway/ (musl 静态, tokio + rustls + instant-acme)
 #   - gtacore: 预构建 glibc 二进制 bin/gtacore (含内嵌 libutls.so)
-#   - 运行镜像: debian 12-slim (glibc，代理高吞吞性能优于 musl)
+#   - 运行镜像: debian 13-slim (glibc 2.41，满足 gtacore 需求 GLIBC_2.39；代理高吞吞性能优于 musl)
 #
 # =========================================
 
 ARG RUST_VERSION=1.96
 ARG ALPINE_VERSION=3.23
-ARG DEBIAN_VERSION=12-slim
+ARG DEBIAN_VERSION=13-slim
 
 # =========================================
 # 构建阶段 1 - gtagate (Rust L4 网关 + ACME)
@@ -44,7 +44,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     strip target/release/gtagate && \
     cp target/release/gtagate /usr/local/bin/gtagate
 
-# 运行阶段 - debian 12-slim (glibc)
+# 运行阶段 - debian 13-slim (glibc 2.41)
 # gtacore 为 glibc 二进制；debian glibc 在代理高并发/加解密负载下吞吞优于 musl。
 # gtagate 为 musl 静态二进制，可在 glibc 系统直接运行。
 FROM debian:${DEBIAN_VERSION}
@@ -77,6 +77,11 @@ RUN apt-get update && \
 # 复制 gtagate (musl 静态, 来自构建阶段) 与 gtacore (本地预构建 glibc 二进制)
 COPY --from=rust-builder --chmod=755 /usr/local/bin/gtagate /usr/bin/gtagate
 COPY --chmod=755 bin/gtacore /usr/bin/gtacore
+
+# 加固：赋予 gtagate 绑定特权端口(443)的 file capability，
+# 使其在 docker run --cap-drop=ALL --cap-add=NET_BIND_SERVICE 下仍可监听 443，
+# 无需容器以 root 全权运行。
+RUN setcap 'cap_net_bind_service=+ep' /usr/bin/gtagate
 
 # 验证版本 (同时验证 musl gtagate 在 glibc 运行、gtacore 内嵌 sidecar)
 RUN gtagate --version && \

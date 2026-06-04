@@ -9,18 +9,18 @@ on:
   #     - '.github/workflows/docker-build.yml'
   workflow_dispatch:  # Manual trigger only - 只能手动触发
     inputs:
-      caddy_version:
-        description: 'Caddy version (default: v2.11.2)'
+      rust_version:
+        description: 'Rust toolchain for gtagate rust-builder (default: 1.96)'
         required: false
-        default: 'v2.11.2'
-      singbox_version:
-        description: 'sing-box version (e.g. 1.13.11)'
-        required: false
-        default: '1.13.11'
+        default: '1.96'
       alpine_version:
-        description: 'Alpine base image version (default: 3.23)'
+        description: 'Alpine version for rust-builder stage (default: 3.23)'
         required: false
         default: '3.23'
+      debian_version:
+        description: 'Debian runtime base image (default: 13-slim)'
+        required: false
+        default: '13-slim'
       force_rebuild:
         description: 'Force rebuild (no cache)'
         required: false
@@ -32,15 +32,17 @@ concurrency:
   cancel-in-progress: true
 
 # =========================================
-# GTAGod v4.1.1 - sing-box 1.13+ 统一架构
+# GTAGod v0.0.1 - gtagate / gtacore 架构
 # =========================================
-# 
-# sing-box 1.13+ 原生支持 naive inbound
-# 不再需要 Caddy forwardproxy 插件
 #
 # 架构:
-#   - Caddy: L4 SNI 分流 + ACME 证书申请
-#   - sing-box 1.13+: naive + anytls + anyreality
+#   - gtagate: Rust (musl 静态二进制), L4 SNI 分流 + ACME 证书申请
+#       由 Dockerfile rust-builder 阶段用 rust:1.96-alpine 编译
+#   - gtacore: Rust 代理核心 (sing-box 配置兼容), 内嵌 libutls sidecar
+#       预构建二进制 bin/gtacore (x86_64 glibc), 直接 COPY 进镜像
+#   - 运行镜像基仓: debian:13-slim (glibc 2.41)
+#
+# 仅支持 linux/amd64 (bin/gtacore 为 amd64 预构建产物)
 #
 # =========================================
 
@@ -50,65 +52,83 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write   # cosign keyless（Sigstore OIDC）签名所需
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6.0.2
+
+      - name: Verify gtacore binary integrity (SHA256)
+        run: |
+          echo "🔒 校验 bin/gtacore 与提交基线一致..."
+          sha256sum -c bin/gtacore.sha256
       
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4.0.0
+        uses: docker/setup-qemu-action@v4.1.0
       
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4.0.0
+        uses: docker/setup-buildx-action@v4.1.0
       
       - name: Login to Docker Hub
-        uses: docker/login-action@v4.0.0
+        uses: docker/login-action@v4.2.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       
       - name: Extract metadata
         id: meta
-        uses: docker/metadata-action@v6.0.0
+        uses: docker/metadata-action@v6.1.0
         with:
           images: ${{ secrets.DOCKERHUB_USERNAME }}/gtagod
           tags: |
             type=raw,value=latest
-            type=raw,value=v4.1.1
+            type=raw,value=v0.0.1
             type=raw,value={{date 'YYYYMMDD'}}
             type=sha,prefix={{date 'YYYYMMDD'}}-
       
       - name: Build and push
-        uses: docker/build-push-action@v7.0.0
+        id: build
+        uses: docker/build-push-action@v7.2.0
         with:
           context: .
           file: ./Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
+          pull: true
           no-cache: ${{ github.event.inputs.force_rebuild || false }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          provenance: mode=max
+          sbom: true
           build-args: |
-            CADDY_VERSION=${{ github.event.inputs.caddy_version || 'v2.11.2' }}
-            SINGBOX_VERSION=${{ github.event.inputs.singbox_version || '1.13.11' }}
+            RUST_VERSION=${{ github.event.inputs.rust_version || '1.96' }}
             ALPINE_VERSION=${{ github.event.inputs.alpine_version || '3.23' }}
+            DEBIAN_VERSION=${{ github.event.inputs.debian_version || '13-slim' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3.7.0
+
+      - name: Sign image (cosign keyless)
+        env:
+          IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/gtagod
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          echo "🔏 cosign keyless 签名 ${IMAGE}@${DIGEST} ..."
+          cosign sign --yes "${IMAGE}@${DIGEST}"
       
       - name: Verify image
         run: |
-          echo "🔍 Verifying GTAGod v4.1.1 image..."
-          docker pull ${{ secrets.DOCKERHUB_USERNAME }}/gtagod:latest
+          echo "🔍 Verifying GTAGod v0.0.1 image..."
+          docker pull ${{ secrets.DOCKERHUB_USERNAME }}/gtagod:v0.0.1
           
-          echo "📦 Checking Caddy..."
-          docker run --rm --entrypoint caddy ${{ secrets.DOCKERHUB_USERNAME }}/gtagod:latest version
+          echo "📦 Checking gtagate..."
+          docker run --rm --entrypoint gtagate ${{ secrets.DOCKERHUB_USERNAME }}/gtagod:v0.0.1 --version
           
-          echo "📦 Checking Caddy modules (layer4 + cloudflare)..."
-          docker run --rm --entrypoint caddy ${{ secrets.DOCKERHUB_USERNAME }}/gtagod:latest list-modules | grep -E "(layer4|cloudflare)"
+          echo "📦 Checking gtacore (sing-box 配置兼容)..."
+          docker run --rm --entrypoint gtacore ${{ secrets.DOCKERHUB_USERNAME }}/gtagod:v0.0.1 sing-box version
           
-          echo "📦 Checking sing-box 1.13+ (native naive inbound)..."
-          docker run --rm --entrypoint sing-box ${{ secrets.DOCKERHUB_USERNAME }}/gtagod:latest version
-          
-          echo "✅ GTAGod v4.1.1 image verification passed!"
-          echo "   - Caddy with layer4 + cloudflare modules"
-          echo "   - sing-box 1.13+ with native naive inbound"
-          echo "   - No external forwardproxy needed!"
+          echo "✅ GTAGod v0.0.1 image verification passed!"
+          echo "   - gtagate (Rust musl) L4 SNI 分流 + ACME"
+          echo "   - gtacore (Rust) sing-box 配置兼容代理核心"
+          echo "   - 纯 Rust 自研代理栈，无外部代理依赖"

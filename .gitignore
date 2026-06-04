@@ -28,6 +28,16 @@
 # =========================================
 !bin/
 !bin/gtacore
+!bin/gtacore.sha256
+
+# =========================================
+# gtagate 网关源码 (Dockerfile rust-builder 阶段构建，排除 target/)
+# =========================================
+!gateway/
+!gateway/Cargo.toml
+!gateway/Cargo.lock
+!gateway/src/
+!gateway/src/**
 
 # =========================================
 # 部署脚本和配置模板

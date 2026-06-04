@@ -3,15 +3,13 @@ set -e
 
 # =========================================
 # GTAGod 统一部署脚本
-# 版本: 4.1.1
-# 更新: 2026-01-01
+# 版本: 0.0.1
 # =========================================
 # 
-# 重大更新 (v4.0.0):
-#   - sing-box 升级到 1.13+，原生支持 naive inbound
-#   - 移除 Caddy forwardproxy 插件依赖
-#   - 统一由 sing-box 处理所有代理协议
-#   - Caddy 仅负责 L4 分流和 TLS 证书申请
+# 架构 (v0.0.1):
+#   - gtagate (Rust): L4 SNI 分流 + ACME (DNS-01) 证书申请，取代 Caddy
+#   - gtacore (Rust, sing-box 配置兼容): 统一处理所有代理协议
+#   - gtacore 原生 naive inbound，内嵌 libutls sidecar
 #
 # 使用方式:
 #   ./run.sh              # 自动检测配置文件
@@ -25,7 +23,8 @@ set -e
 #   3. 进入交互模式
 #
 # =========================================
-VERSION="4.1.1"
+VERSION="0.0.1"
+DEFAULT_GTAGOD_IMAGE="aizhihuxiao/gtagod:latest"
 
 # =========================================
 # 日志函数
@@ -50,6 +49,28 @@ normalize_bool() {
         true|TRUE|1|yes|YES|y|Y) echo "true" ;;
         *) echo "false" ;;
     esac
+}
+
+normalize_profile() {
+    case "${1:-azure}" in
+        azure|AZURE) echo "azure" ;;
+        sakura|sakura-jp|jp|JP) echo "sakura-jp" ;;
+        legacy|LEGACY) echo "legacy" ;;
+        *) echo "azure" ;;
+    esac
+}
+
+check_decimal_value() {
+  local value="$1"
+  local label="$2"
+
+  if [ -z "$value" ]; then
+    log_success "${label} 未设置，使用 Docker 默认值"
+  elif echo "$value" | grep -Eq '^[0-9]+([.][0-9]+)?$' && awk "BEGIN { exit !($value > 0) }"; then
+    log_success "${label} 配置有效: ${value}"
+  else
+    preflight_error "${label} 配置无效: ${value}"
+  fi
 }
 
 # =========================================
@@ -90,6 +111,18 @@ preflight_error() {
 preflight_warning() {
     log_warning "$1"
     PREFLIGHT_WARNINGS=$((PREFLIGHT_WARNINGS + 1))
+}
+
+# 带超时执行命令；若系统无 timeout 命令则直接执行
+# 用法: run_with_timeout <秒> <命令> [参数...]
+run_with_timeout() {
+    local secs="$1"
+    shift
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$secs" "$@"
+    else
+        "$@"
+    fi
 }
 
 check_positive_integer_value() {
@@ -189,6 +222,7 @@ check_port_available() {
 }
 
 run_preflight_checks() {
+  local check_generated="${1:-true}"
     PREFLIGHT_ERRORS=0
     PREFLIGHT_WARNINGS=0
 
@@ -237,63 +271,92 @@ run_preflight_checks() {
       check_dns_resolution "$anyreality_sni" "AnyReality SNI"
     fi
 
+    case "$dns_strategy" in
+      prefer_ipv4|prefer_ipv6|ipv4_only|ipv6_only)
+        log_success "gtacore DNS strategy 配置有效: ${dns_strategy}"
+        ;;
+      *)
+        preflight_error "gtacore DNS strategy 配置无效: ${dns_strategy}"
+        ;;
+    esac
+
     check_gomemlimit_value "$container_gomemlimit"
+    check_size_value "$container_memory_limit" "容器内存限制"
+    check_decimal_value "$container_cpus" "容器 CPU 限制"
     check_positive_integer_value "$container_pids_limit" "容器 PIDs 限制"
     check_size_value "$container_tmpfs_size" "容器 /tmp tmpfs 大小"
     check_size_value "$container_log_max_size" "容器日志轮转大小"
     check_positive_integer_value "$container_log_max_file" "容器日志轮转文件数"
 
-    if [ ! -f "./caddy/Caddyfile" ]; then
-        preflight_error "缺少生成后的 Caddyfile: ./caddy/Caddyfile"
-    else
-        log_success "已生成 Caddyfile"
-        if grep -Eq '{{[A-Z0-9_]+}}' ./caddy/Caddyfile; then
-            preflight_error "Caddyfile 仍包含未替换占位符"
+    if [ "$check_generated" = "true" ]; then
+      if [ ! -f "./gtagate/config.json" ]; then
+        preflight_error "缺少生成后的 gtagate 配置: ./gtagate/config.json"
+      else
+        log_success "已生成 gtagate 配置"
+        if command -v jq >/dev/null 2>&1; then
+          if jq empty ./gtagate/config.json >/dev/null 2>&1; then
+            log_success "gtagate 配置 JSON 格式有效"
+          else
+            preflight_error "gtagate 配置不是有效 JSON"
+          fi
         else
-            log_success "Caddyfile 占位符已全部替换"
+          preflight_warning "未找到 jq，跳过 gtagate JSON 校验"
         fi
-    fi
+      fi
 
-    if [ ! -f "./singbox/config.json" ]; then
+      if [ ! -f "./singbox/config.json" ]; then
         preflight_error "缺少生成后的 sing-box 配置: ./singbox/config.json"
-    else
+      else
         log_success "已生成 sing-box 配置"
         if grep -Eq '{{[A-Z0-9_]+}}' ./singbox/config.json; then
-            preflight_error "sing-box 配置仍包含未替换占位符"
+          preflight_error "sing-box 配置仍包含未替换占位符"
         else
-            log_success "sing-box 配置占位符已全部替换"
+          log_success "sing-box 配置占位符已全部替换"
         fi
 
         if command -v jq >/dev/null 2>&1; then
-            if jq empty ./singbox/config.json >/dev/null 2>&1; then
-                log_success "sing-box 配置 JSON 格式有效"
-            else
-                preflight_error "sing-box 配置不是有效 JSON"
-            fi
+          if jq empty ./singbox/config.json >/dev/null 2>&1; then
+            log_success "sing-box 配置 JSON 格式有效"
+          else
+            preflight_error "sing-box 配置不是有效 JSON"
+          fi
         else
-            preflight_warning "未找到 jq，跳过 sing-box JSON 校验"
+          preflight_warning "未找到 jq，跳过 sing-box JSON 校验"
         fi
 
-        if docker image inspect aizhihuxiao/gtagod:latest >/dev/null 2>&1; then
-          if docker run --rm --entrypoint sing-box -v "$PWD/singbox/config.json:/etc/sing-box/config.json:ro" aizhihuxiao/gtagod:latest check -c /etc/sing-box/config.json >/tmp/gtagod-singbox-preflight.log 2>&1; then
-            log_success "基于镜像的 sing-box 配置校验通过"
+        FIRST_CERT_PATH=""
+        FIRST_CERT_HOST_PATH=""
+        if command -v jq >/dev/null 2>&1; then
+          FIRST_CERT_PATH=$(jq -r '..|.certificate_path? // empty' ./singbox/config.json 2>/dev/null | head -n 1)
+        fi
+        if [ -n "$FIRST_CERT_PATH" ]; then
+          FIRST_CERT_HOST_PATH="$PWD/caddy/data/${FIRST_CERT_PATH#/data/caddy/}"
+        fi
+
+        if [ -n "$FIRST_CERT_PATH" ] && [ ! -f "$FIRST_CERT_HOST_PATH" ]; then
+          preflight_warning "证书尚未生成，跳过镜像内 gtacore 完整校验；容器启动后会在证书就绪后校验"
+        elif docker image inspect "$gtagod_image" >/dev/null 2>&1; then
+          if docker run --rm --entrypoint gtacore -v "$PWD/singbox/config.json:/etc/sing-box/config.json:ro" -v "$PWD/caddy/data:/data/caddy:ro" "$gtagod_image" sing-box check -c /etc/sing-box/config.json >/tmp/gtagod-singbox-preflight.log 2>&1; then
+          log_success "基于镜像的 gtacore 配置校验通过"
           else
-            cat /tmp/gtagod-singbox-preflight.log
-            preflight_error "基于镜像的 sing-box 配置校验失败"
+          cat /tmp/gtagod-singbox-preflight.log
+          preflight_error "基于镜像的 gtacore 配置校验失败"
           fi
           rm -f /tmp/gtagod-singbox-preflight.log
         else
-          preflight_warning "本地不存在 aizhihuxiao/gtagod:latest，跳过基于镜像的 sing-box 配置校验"
+          preflight_warning "本地不存在 ${gtagod_image}，跳过基于镜像的 gtacore 配置校验"
         fi
-    fi
+      fi
 
-    if [ ! -w "$PWD/caddy/data" ] || [ ! -w "$PWD/caddy/logs" ] || [ ! -w "$PWD/singbox/logs" ]; then
+      if [ ! -w "$PWD/caddy/data" ] || [ ! -w "$PWD/caddy/logs" ] || [ ! -w "$PWD/singbox/logs" ]; then
         preflight_error "部署目录权限不足，容器可能无法写入日志或证书"
-    else
+      else
         log_success "部署目录权限检查通过"
+      fi
+    else
+      log_info "纯 preflight 模式：跳过生成文件、目录写入和镜像内配置校验"
     fi
 
-    check_port_available 80 "HTTP / ACME"
     check_port_available 443 "HTTPS / L4"
     check_port_available "$naive_port" "sing-box naive inbound"
     if [ "$enable_anytls" = "true" ]; then
@@ -307,24 +370,24 @@ run_preflight_checks() {
         preflight_warning "已启用 kTLS，但宿主机 /lib/modules 不存在，容器内模块校验可能失败"
     fi
 
-    if docker image inspect aizhihuxiao/gtagod:latest >/dev/null 2>&1; then
+    if docker image inspect "$gtagod_image" >/dev/null 2>&1; then
       log_success "本地已存在 GTAGod 镜像"
-    elif docker manifest inspect aizhihuxiao/gtagod:latest >/dev/null 2>&1; then
+    elif run_with_timeout 15 docker manifest inspect "$gtagod_image" >/dev/null 2>&1; then
       log_success "Docker Hub 可访问，GTAGod 镜像可拉取"
     else
-      preflight_error "无法确认 aizhihuxiao/gtagod:latest 可访问，请检查 Docker Hub 网络和拉取权限"
+      preflight_warning "无法在 15s 内确认 ${gtagod_image} 可访问（网络受限或镜像未缓存），将在部署时直接拉取"
     fi
 
-    if docker image inspect aizhihuxiao/gtagod:latest >/dev/null 2>&1; then
-        if docker run --rm --entrypoint caddy -v "$PWD/caddy/Caddyfile:/etc/caddy/Caddyfile:ro" aizhihuxiao/gtagod:latest validate --config /etc/caddy/Caddyfile --adapter caddyfile >/tmp/gtagod-caddy-preflight.log 2>&1; then
-            log_success "基于镜像的 Caddyfile 校验通过"
+    if [ "$check_generated" = "true" ] && docker image inspect "$gtagod_image" >/dev/null 2>&1; then
+        if docker run --rm --entrypoint jq -v "$PWD/gtagate/config.json:/etc/gtagate/config.json:ro" "$gtagod_image" empty /etc/gtagate/config.json >/tmp/gtagod-gtagate-preflight.log 2>&1; then
+            log_success "基于镜像的 gtagate 配置校验通过"
         else
-            cat /tmp/gtagod-caddy-preflight.log
-            preflight_error "基于镜像的 Caddyfile 校验失败"
+            cat /tmp/gtagod-gtagate-preflight.log
+            preflight_error "基于镜像的 gtagate 配置校验失败"
         fi
-        rm -f /tmp/gtagod-caddy-preflight.log
-    else
-        preflight_warning "本地不存在 aizhihuxiao/gtagod:latest，跳过基于镜像的 Caddyfile 校验"
+        rm -f /tmp/gtagod-gtagate-preflight.log
+    elif [ "$check_generated" = "true" ]; then
+        preflight_warning "本地不存在 ${gtagod_image}，跳过基于镜像的 gtagate 配置校验"
     fi
 
     echo ""
@@ -355,6 +418,8 @@ singbox_log_level="info"
 dns_primary_server="1.1.1.1"
 dns_secondary_server="8.8.8.8"
 dns_tertiary_server="9.9.9.9"
+dns_strategy="prefer_ipv4"
+deployment_profile="azure"
 cert_wait_max="180"
 cert_retry_interval="30"
 cert_retry_max="10"
@@ -362,12 +427,19 @@ enable_ktls="false"
 kernel_tx="false"
 prepare_host_system="true"
 auto_install_docker="true"
-host_ipv6_tuning="true"
-host_dns_tuning="true"
+disable_ipv6="false"
+host_ipv6_tuning="false"
+host_dns_tuning="false"
+host_dns_options="single-request-reopen"
 host_firewall_management="true"
 host_network_optimization="true"
-enable_watchtower="true"
+enable_watchtower="false"
+watchtower_image="containrrr/watchtower:1.7.1"
+gtagod_image="$DEFAULT_GTAGOD_IMAGE"
 container_gomemlimit="384MiB"
+container_memory_limit="512m"
+container_cpus=""
+container_read_only="true"
 container_pids_limit="512"
 container_tmpfs_size="64m"
 container_log_max_size="10m"
@@ -494,24 +566,32 @@ select_ca_by_id() {
       DNS_PRIMARY_SERVER) DNS_PRIMARY_SERVER="$value" ;;
       DNS_SECONDARY_SERVER) DNS_SECONDARY_SERVER="$value" ;;
       DNS_TERTIARY_SERVER) DNS_TERTIARY_SERVER="$value" ;;
+      DNS_STRATEGY) DNS_STRATEGY="$value" ;;
       DNS_PRIMARY_URL) DNS_PRIMARY_SERVER="$value" ;;
       DNS_SECONDARY_URL) DNS_SECONDARY_SERVER="$value" ;;
       DNS_TERTIARY_URL) DNS_TERTIARY_SERVER="$value" ;;
+      DEPLOY_PROFILE) DEPLOY_PROFILE="$value" ;;
       FORCE_ACME_CA) FORCE_ACME_CA="$value" ;;
       DISABLE_IPV6) DISABLE_IPV6="$value" ;;
       PREPARE_HOST_SYSTEM) PREPARE_HOST_SYSTEM="$value" ;;
       AUTO_INSTALL_DOCKER) AUTO_INSTALL_DOCKER="$value" ;;
       HOST_IPV6_TUNING) HOST_IPV6_TUNING="$value" ;;
       HOST_DNS_TUNING) HOST_DNS_TUNING="$value" ;;
+      HOST_DNS_OPTIONS) HOST_DNS_OPTIONS="$value" ;;
       HOST_NETWORK_OPTIMIZATION) HOST_NETWORK_OPTIMIZATION="$value" ;;
       HOST_FIREWALL_MANAGEMENT) HOST_FIREWALL_MANAGEMENT="$value" ;;
       ENABLE_WATCHTOWER) ENABLE_WATCHTOWER="$value" ;;
+      WATCHTOWER_IMAGE) WATCHTOWER_IMAGE="$value" ;;
       ENABLE_MPTCP) ENABLE_MPTCP="$value" ;;
       ENABLE_KTLS) ENABLE_KTLS="$value" ;;
       CERT_WAIT_MAX) CERT_WAIT_MAX="$value" ;;
       CERT_RETRY_INTERVAL) CERT_RETRY_INTERVAL="$value" ;;
       CERT_RETRY_MAX) CERT_RETRY_MAX="$value" ;;
+      GTAGOD_IMAGE) GTAGOD_IMAGE="$value" ;;
       CONTAINER_GOMEMLIMIT) CONTAINER_GOMEMLIMIT="$value" ;;
+      CONTAINER_MEMORY_LIMIT) CONTAINER_MEMORY_LIMIT="$value" ;;
+      CONTAINER_CPUS) CONTAINER_CPUS="$value" ;;
+      CONTAINER_READ_ONLY) CONTAINER_READ_ONLY="$value" ;;
       CONTAINER_PIDS_LIMIT) CONTAINER_PIDS_LIMIT="$value" ;;
       CONTAINER_TMPFS_SIZE) CONTAINER_TMPFS_SIZE="$value" ;;
       CONTAINER_LOG_MAX_SIZE) CONTAINER_LOG_MAX_SIZE="$value" ;;
@@ -594,14 +674,43 @@ load_config_file() {
     dns_tertiary_server="${DNS_TERTIARY_SERVER:-9.9.9.9}"
     
     # 网络配置
-    disable_ipv6="$(normalize_bool "${DISABLE_IPV6:-true}")"
+    deployment_profile="$(normalize_profile "${DEPLOY_PROFILE:-azure}")"
+    case "$deployment_profile" in
+      sakura-jp)
+        profile_disable_ipv6="true"
+        profile_host_ipv6_tuning="true"
+        profile_host_dns_tuning="true"
+        profile_host_dns_options="use-vc"
+        profile_dns_strategy="ipv4_only"
+        ;;
+      legacy)
+        profile_disable_ipv6="true"
+        profile_host_ipv6_tuning="true"
+        profile_host_dns_tuning="true"
+        profile_host_dns_options="single-request-reopen"
+        profile_dns_strategy="ipv4_only"
+        ;;
+      *)
+        profile_disable_ipv6="false"
+        profile_host_ipv6_tuning="false"
+        profile_host_dns_tuning="false"
+        profile_host_dns_options="single-request-reopen"
+        profile_dns_strategy="prefer_ipv4"
+        ;;
+    esac
+
+    dns_strategy="${DNS_STRATEGY:-$profile_dns_strategy}"
+
+    disable_ipv6="$(normalize_bool "${DISABLE_IPV6:-$profile_disable_ipv6}")"
     prepare_host_system="$(normalize_bool "${PREPARE_HOST_SYSTEM:-true}")"
     auto_install_docker="$(normalize_bool "${AUTO_INSTALL_DOCKER:-true}")"
-    host_ipv6_tuning="$(normalize_bool "${HOST_IPV6_TUNING:-true}")"
-    host_dns_tuning="$(normalize_bool "${HOST_DNS_TUNING:-true}")"
+    host_ipv6_tuning="$(normalize_bool "${HOST_IPV6_TUNING:-$profile_host_ipv6_tuning}")"
+    host_dns_tuning="$(normalize_bool "${HOST_DNS_TUNING:-$profile_host_dns_tuning}")"
+    host_dns_options="${HOST_DNS_OPTIONS:-$profile_host_dns_options}"
     host_firewall_management="$(normalize_bool "${HOST_FIREWALL_MANAGEMENT:-true}")"
     host_network_optimization="$(normalize_bool "${HOST_NETWORK_OPTIMIZATION:-true}")"
-    enable_watchtower="$(normalize_bool "${ENABLE_WATCHTOWER:-true}")"
+    enable_watchtower="$(normalize_bool "${ENABLE_WATCHTOWER:-false}")"
+    watchtower_image="${WATCHTOWER_IMAGE:-containrrr/watchtower:1.7.1}"
 
     # MPTCP 配置 (tcp_multi_path)
     enable_mptcp="${ENABLE_MPTCP:-false}"
@@ -617,7 +726,11 @@ load_config_file() {
     cert_retry_max="${CERT_RETRY_MAX:-10}"
 
     # 容器运行时配置
+    gtagod_image="${GTAGOD_IMAGE:-$DEFAULT_GTAGOD_IMAGE}"
     container_gomemlimit="${CONTAINER_GOMEMLIMIT:-384MiB}"
+    container_memory_limit="${CONTAINER_MEMORY_LIMIT:-512m}"
+    container_cpus="${CONTAINER_CPUS:-}"
+    container_read_only="$(normalize_bool "${CONTAINER_READ_ONLY:-true}")"
     container_pids_limit="${CONTAINER_PIDS_LIMIT:-512}"
     container_tmpfs_size="${CONTAINER_TMPFS_SIZE:-64m}"
     container_log_max_size="${CONTAINER_LOG_MAX_SIZE:-10m}"
@@ -713,10 +826,18 @@ interactive_config() {
         read -p "请输入域名: " domain
     done
     
-    read -p "请输入 Cloudflare API Token: " cloudflareApiToken
+    printf "请输入 Cloudflare API Token: "
+    stty -echo
+    read cloudflareApiToken
+    stty echo
+    echo ""
     while [ -z "$cloudflareApiToken" ]; do
         log_error "Token 不能为空!"
-        read -p "请输入 Cloudflare API Token: " cloudflareApiToken
+        printf "请输入 Cloudflare API Token: "
+        stty -echo
+        read cloudflareApiToken
+        stty echo
+        echo ""
     done
     
     read -p "请输入 NaiveProxy 用户名: " naive_user
@@ -768,7 +889,7 @@ interactive_config() {
         # 生成 Reality 密钥对
         echo ""
         log_info "生成 Reality 密钥对..."
-        if docker run --rm ghcr.io/sagernet/sing-box generate reality-keypair > /tmp/reality_keys.txt 2>/dev/null; then
+        if docker run --rm --entrypoint gtacore "${gtagod_image:-$DEFAULT_GTAGOD_IMAGE}" sing-box generate reality-keypair > /tmp/reality_keys.txt 2>/dev/null; then
             anyreality_private_key=$(grep "PrivateKey" /tmp/reality_keys.txt | cut -d: -f2 | tr -d ' ')
             anyreality_public_key=$(grep "PublicKey" /tmp/reality_keys.txt | cut -d: -f2 | tr -d ' ')
             rm -f /tmp/reality_keys.txt
@@ -878,18 +999,26 @@ echo "========================================="
 echo "配置摘要"
 echo "========================================="
 echo "部署模式: ${DEPLOY_MODE}"
+echo "部署配置档: ${deployment_profile}"
 echo "域名: ${domain}"
 echo "NaiveProxy 用户: ${naive_user}"
 echo "ACME CA: ${SELECTED_CA_NAME}"
+echo "镜像: ${gtagod_image}"
 echo "IPv6: $( [ "$disable_ipv6" = "true" ] && echo "禁用" || echo "保留" )"
 echo "宿主机初始化: $( [ "$prepare_host_system" = "true" ] && echo "开启" || echo "关闭" )"
 echo "自动安装 Docker: $( [ "$auto_install_docker" = "true" ] && echo "开启" || echo "关闭" )"
 echo "宿主机 IPv6 调整: $( [ "$host_ipv6_tuning" = "true" ] && echo "开启" || echo "关闭" )"
 echo "宿主机 DNS 调整: $( [ "$host_dns_tuning" = "true" ] && echo "开启" || echo "关闭" )"
+echo "宿主机 DNS options: ${host_dns_options}"
+echo "gtacore DNS strategy: ${dns_strategy}"
 echo "宿主机网络优化: $( [ "$host_network_optimization" = "true" ] && echo "开启" || echo "关闭" )"
 echo "宿主机防火墙管理: $( [ "$host_firewall_management" = "true" ] && echo "开启" || echo "关闭" )"
 echo "Watchtower 自动更新: $( [ "$enable_watchtower" = "true" ] && echo "开启" || echo "关闭" )"
+echo "Watchtower 镜像: ${watchtower_image}"
 echo "容器 GOMEMLIMIT: ${container_gomemlimit}"
+echo "容器内存限制: ${container_memory_limit}"
+echo "容器 CPU 限制: ${container_cpus:-Docker 默认}"
+echo "容器只读根文件系统: $( [ "$container_read_only" = "true" ] && echo "开启" || echo "关闭" )"
 echo "容器 PIDs 限制: ${container_pids_limit}"
 echo "容器 /tmp tmpfs: ${container_tmpfs_size}"
 echo "容器日志轮转: ${container_log_max_size} x ${container_log_max_file}"
@@ -913,6 +1042,15 @@ if [ "$enable_anyreality" = "true" ]; then
 fi
 echo "========================================="
 echo ""
+
+if [ "$PREFLIGHT_ONLY" = "true" ]; then
+  if ! run_preflight_checks false; then
+    log_error "preflight 检查失败，请先修复以上问题"
+    exit 1
+  fi
+  log_success "preflight 检查完成，未修改宿主机或生成部署文件"
+  exit 0
+fi
 
 # 确认部署
 read -p "确认开始部署? (y/n): " confirm
@@ -976,11 +1114,11 @@ SYSCTL_EOF
     fi
 
     chattr -i /etc/resolv.conf 2>/dev/null || true
-    if ! grep -q "8.8.8.8" /etc/resolv.conf || ! grep -q "single-request-reopen" /etc/resolv.conf; then
-      cat > /etc/resolv.conf << 'RESOLV_EOF'
+    if ! grep -q "8.8.8.8" /etc/resolv.conf || ! grep -q "options ${host_dns_options}" /etc/resolv.conf; then
+      cat > /etc/resolv.conf << RESOLV_EOF
 nameserver 8.8.8.8
 nameserver 1.1.1.1
-options single-request-reopen
+options ${host_dns_options}
 RESOLV_EOF
     fi
     chattr +i /etc/resolv.conf 2>/dev/null || true
@@ -1080,60 +1218,101 @@ chmod 750 "$PWD/caddy" "$PWD/caddy/data" "$PWD/caddy/config" "$PWD/caddy/logs"
 chmod 750 "$PWD/singbox" "$PWD/singbox/logs"
 
 # =========================================
-# 生成 Caddyfile
+# 确保 sing-box 模板可用
 # =========================================
-log_info "生成 Caddyfile..."
+# 模板已烤进镜像 /opt/gtagod/templates/，本地缺失时自动从镜像提取，
+# 从而免去在服务器单独上传这些模板文件。本地已存在则优先使用本地副本。
+ensure_singbox_templates() {
+    local needed="singbox-config.naive.example singbox-config.anytls-combo.example singbox-config.anyreality-combo.example singbox-config.l4.example"
+    local missing=""
+    for f in $needed; do
+        [ -f "./$f" ] || missing="$missing $f"
+    done
+    [ -z "$missing" ] && return 0
 
-# 检查 Caddyfile 是否存在（可能是文件或目录）
-if [ -e "./caddy/Caddyfile" ]; then
-    if [ -f "./caddy/Caddyfile" ]; then
-        log_warning "发现已存在的 Caddyfile，正在备份..."
-        mv ./caddy/Caddyfile ./caddy/Caddyfile.bak.$(date +%s)
-    else
-        log_warning "发现异常的 Caddyfile（非普通文件），正在删除..."
-        rm -rf ./caddy/Caddyfile
+    log_info "本地缺少 sing-box 模板，尝试从镜像提取:$missing"
+    if ! docker image inspect "$gtagod_image" >/dev/null 2>&1; then
+        log_info "拉取镜像以提取模板: $gtagod_image"
+        docker pull "$gtagod_image" >/dev/null 2>&1 || true
     fi
+    if ! docker image inspect "$gtagod_image" >/dev/null 2>&1; then
+        log_warning "无法获取镜像，跳过模板提取（将回退到内联生成）"
+        return 0
+    fi
+
+    for f in $missing; do
+        if docker run --rm --entrypoint cat "$gtagod_image" "/opt/gtagod/templates/$f" > "./$f.tmp" 2>/dev/null && [ -s "./$f.tmp" ]; then
+            mv "./$f.tmp" "./$f"
+            log_success "已从镜像提取模板: $f"
+        else
+            rm -f "./$f.tmp"
+            log_warning "镜像内未找到模板 $f，将回退到内联生成"
+        fi
+    done
+}
+
+ensure_singbox_templates
+
+# =========================================
+# 生成 gtagate 配置 (L4 SNI 分流 + ACME)
+# =========================================
+log_info "生成 gtagate 配置..."
+
+mkdir -p ./gtagate
+chmod 750 ./gtagate
+
+# 清理异常文件（如目录）
+if [ -e "./gtagate/config.json" ] && [ ! -f "./gtagate/config.json" ]; then
+    log_warning "发现异常的 gtagate/config.json（非普通文件），正在删除..."
+    rm -rf ./gtagate/config.json
 fi
 
-# 选择模板
-# v4.0.0: 由于 sing-box 1.13 原生支持 naive，所有模式都使用 Caddyfile.singbox.example
-if [ "$enable_l4" = "true" ] && [ -f "Caddyfile.singbox.example" ]; then
-    log_info "使用 sing-box L4 SNI 分流模板..."
-    cp Caddyfile.singbox.example ./caddy/Caddyfile
-elif [ "$enable_anytls" = "true" ] || [ "$enable_anyreality" = "true" ]; then
-    if [ -f "Caddyfile.singbox.example" ]; then
-        log_info "使用 sing-box 标准模板..."
-        cp Caddyfile.singbox.example ./caddy/Caddyfile
-    elif [ -f "Caddyfile.reality.example" ]; then
-        log_warning "未找到 Caddyfile.singbox.example，使用旧版模板..."
-        cp Caddyfile.reality.example ./caddy/Caddyfile
-    fi
-elif [ -f "Caddyfile.singbox.example" ]; then
-    log_info "使用 sing-box naive 模板..."
-    cp Caddyfile.singbox.example ./caddy/Caddyfile
-elif [ -f "Caddyfile.reality.example" ]; then
-    log_warning "未找到 Caddyfile.singbox.example，使用旧版模板..."
-    cp Caddyfile.reality.example ./caddy/Caddyfile
-else
-    log_error "未找到 Caddyfile 模板"
+# 组装 SNI 路由表（anytls / anyreality 透传到对应 sing-box 端口）
+GTAGATE_ROUTES="[]"
+if [ "$enable_anytls" = "true" ]; then
+    GTAGATE_ROUTES=$(echo "$GTAGATE_ROUTES" | jq -c \
+        --arg sni "$anytls_sni" \
+        --arg up "127.0.0.1:${anytls_port}" \
+        '. + [{sni: $sni, upstream: $up}]')
+fi
+if [ "$enable_anyreality" = "true" ]; then
+    GTAGATE_ROUTES=$(echo "$GTAGATE_ROUTES" | jq -c \
+        --arg sni "$anyreality_sni" \
+        --arg up "127.0.0.1:${anyreality_port}" \
+        '. + [{sni: $sni, upstream: $up}]')
+fi
+
+# 生成 config.json：Cloudflare Token 不写入文件，运行时由容器环境变量
+# CLOUDFLARE_API_TOKEN 提供（修复旧版把 Token 明文 sed 进配置的隐患）
+jq -n \
+    --argjson routes "$GTAGATE_ROUTES" \
+    --arg default_up "127.0.0.1:${naive_port}" \
+    --arg domain "$domain" \
+    --arg email "admin@${domain}" \
+    --arg ca "$SELECTED_CA_ID" \
+    '{
+        listen: "0.0.0.0:443",
+        dispatch_timeout_secs: 30,
+        routes: $routes,
+        default_upstream: $default_up,
+        acme: {
+            enabled: true,
+            domains: ["*." + $domain],
+            email: $email,
+            ca: $ca,
+            cert_dir: "/data/caddy/certificates",
+            renew_before_days: 30,
+            dns_propagation_secs: 20
+        }
+    }' > ./gtagate/config.json
+
+if ! jq empty ./gtagate/config.json >/dev/null 2>&1; then
+    log_error "生成的 gtagate/config.json 不是合法 JSON"
     exit 1
 fi
 
-# 替换占位符
-sed -i "s|{{DOMAIN}}|${domain}|g" ./caddy/Caddyfile
-sed -i "s|{{CLOUDFLARE_API_TOKEN}}|${cloudflareApiToken}|g" ./caddy/Caddyfile
-sed -i "s|{{NAIVE_USER}}|${naive_user}|g" ./caddy/Caddyfile
-sed -i "s|{{NAIVE_PASSWD}}|${naive_passwd}|g" ./caddy/Caddyfile
-sed -i "s|{{NAIVE_PORT}}|${naive_port}|g" ./caddy/Caddyfile
-sed -i "s|{{ACME_CA_CONFIG}}|${SELECTED_CA_CONFIG}|g" ./caddy/Caddyfile
-
-sed -i "s|{{ANYTLS_PORT}}|${anytls_port}|g" ./caddy/Caddyfile
-sed -i "s|{{ANYTLS_SNI}}|${anytls_sni}|g" ./caddy/Caddyfile
-sed -i "s|{{ANYREALITY_PORT}}|${anyreality_port}|g" ./caddy/Caddyfile
-sed -i "s|{{ANYREALITY_SNI}}|${anyreality_sni}|g" ./caddy/Caddyfile
-
-log_success "Caddyfile 生成完成"
-chmod 640 ./caddy/Caddyfile
+log_success "gtagate 配置生成完成"
+chmod 640 ./gtagate/config.json
 
 replace_singbox_placeholders() {
   local config_path="$1"
@@ -1160,15 +1339,16 @@ replace_singbox_placeholders() {
   sed -i "s|{{TCP_MULTI_PATH}}|${tcp_multi_path}|g" "$config_path"
   sed -i "s|{{KERNEL_TX}}|${kernel_tx}|g" "$config_path"
   sed -i "s|{{SINGBOX_LOG_LEVEL}}|${singbox_log_level}|g" "$config_path"
+  sed -i "s|{{DNS_STRATEGY}}|${dns_strategy}|g" "$config_path"
   sed -i "s|{{DNS_PRIMARY_SERVER}}|${dns_primary_server}|g" "$config_path"
   sed -i "s|{{DNS_SECONDARY_SERVER}}|${dns_secondary_server}|g" "$config_path"
   sed -i "s|{{DNS_TERTIARY_SERVER}}|${dns_tertiary_server}|g" "$config_path"
 }
 
 # =========================================
-# 生成 sing-box 配置 (v4.0.0: 统一由 sing-box 处理所有协议)
+# 生成 gtacore 配置 (v0.0.1: 统一由 gtacore 处理所有协议，sing-box 配置格式)
 # =========================================
-log_info "生成 sing-box 统一配置..."
+log_info "生成 gtacore 统一配置..."
 mkdir -p ./singbox
 
 # 检查 config.json 是否存在异常（如目录）
@@ -1180,8 +1360,8 @@ fi
 # 根据部署模式生成不同的 sing-box 配置
 case "$DEPLOY_MODE" in
     naive)
-        # 仅 NaiveProxy 模式 - 使用 sing-box naive inbound
-        log_info "生成 NaiveProxy 单独配置 (sing-box 1.13 native naive)..."
+        # 仅 NaiveProxy 模式 - 使用 gtacore naive inbound
+        log_info "生成 NaiveProxy 单独配置 (gtacore native naive)..."
         if [ -f "singbox-config.naive.example" ]; then
             cp singbox-config.naive.example ./singbox/config.json
             replace_singbox_placeholders ./singbox/config.json
@@ -1214,7 +1394,7 @@ case "$DEPLOY_MODE" in
         "server_port": 443
       }
     ],
-    "strategy": "ipv4_only"
+    "strategy": "${dns_strategy}"
   },
   "route": {
     "default_domain_resolver": "doh-primary"
@@ -1288,7 +1468,7 @@ EOF
         "server_port": 443
       }
     ],
-    "strategy": "ipv4_only"
+    "strategy": "${dns_strategy}"
   },
   "route": {
     "default_domain_resolver": "doh-primary"
@@ -1393,7 +1573,7 @@ EOF
         "server_port": 443
       }
     ],
-    "strategy": "ipv4_only"
+    "strategy": "${dns_strategy}"
   },
   "route": {
     "default_domain_resolver": "doh-primary"
@@ -1505,7 +1685,7 @@ EOF
         "server_port": 443
       }
     ],
-    "strategy": "ipv4_only"
+    "strategy": "${dns_strategy}"
   },
   "route": {
     "default_domain_resolver": "doh-primary"
@@ -1644,10 +1824,10 @@ fi
 # =========================================
 # 拉取镜像并启动容器
 # =========================================
-log_info "拉取最新 Docker 镜像..."
-if ! docker pull aizhihuxiao/gtagod:latest; then
+log_info "拉取 Docker 镜像: ${gtagod_image}"
+if ! docker pull "$gtagod_image"; then
     log_warning "镜像拉取失败，尝试使用本地镜像..."
-    if ! docker images | grep -q "aizhihuxiao/gtagod"; then
+  if ! docker image inspect "$gtagod_image" >/dev/null 2>&1; then
         log_error "本地镜像不存在，无法继续"
         exit 1
     fi
@@ -1675,8 +1855,27 @@ if [ "$kernel_tx" = "true" ]; then
     log_info "kTLS: 挂载 /lib/modules 到容器"
 fi
 
-# v4.0.0: 所有模式都需要 sing-box (包括 naive only)
-# 因为 sing-box 1.13+ 原生支持 naive inbound
+# 加固：丢弃所有 Linux capabilities，仅保留必需的最小集。
+#   - NET_BIND_SERVICE: gtagate 绑定 443（配合镜像内 setcap）
+#   - 开启 kTLS 时额外需 SYS_MODULE 供 modprobe 加载内核模块
+DOCKER_CAP_ARGS="--cap-drop=ALL --cap-add=NET_BIND_SERVICE"
+if [ "$kernel_tx" = "true" ]; then
+    DOCKER_CAP_ARGS="${DOCKER_CAP_ARGS} --cap-add=SYS_MODULE"
+    log_info "kTLS: 为 modprobe 添加 CAP_SYS_MODULE"
+fi
+
+DOCKER_RESOURCE_ARGS="--memory ${container_memory_limit} --memory-swap ${container_memory_limit}"
+if [ -n "$container_cpus" ]; then
+  DOCKER_RESOURCE_ARGS="${DOCKER_RESOURCE_ARGS} --cpus ${container_cpus}"
+fi
+
+DOCKER_READ_ONLY_ARGS=""
+if [ "$container_read_only" = "true" ]; then
+  DOCKER_READ_ONLY_ARGS="--read-only --tmpfs /run:rw,nosuid,nodev,size=16m"
+fi
+
+# v0.0.1: 所有模式都需要 gtacore (包括 naive only)
+# 因为 gtacore 原生支持 naive inbound
 if [ -f "$PWD/singbox/config.json" ]; then
     docker run -d --name caddy \
         --restart=always \
@@ -1684,7 +1883,10 @@ if [ -f "$PWD/singbox/config.json" ]; then
         --net=host \
         --ulimit nofile=1048576:1048576 \
       --pids-limit ${container_pids_limit} \
+      ${DOCKER_RESOURCE_ARGS} \
+      ${DOCKER_READ_ONLY_ARGS} \
       --tmpfs /tmp:rw,exec,nosuid,nodev,size=${container_tmpfs_size} \
+      ${DOCKER_CAP_ARGS} \
       --security-opt no-new-privileges:true \
       --log-opt max-size=${container_log_max_size} \
       --log-opt max-file=${container_log_max_file} \
@@ -1694,16 +1896,16 @@ if [ -f "$PWD/singbox/config.json" ]; then
         -e CERT_RETRY_MAX="${cert_retry_max}" \
       -e GOMEMLIMIT="${container_gomemlimit}" \
         ${DOCKER_EXTRA_ARGS} \
-        -v $PWD/caddy/Caddyfile:/etc/caddy/Caddyfile:ro \
-        -v $PWD/caddy/data:/data/caddy \
-        -v $PWD/caddy/config:/config \
-        -v $PWD/caddy/logs:/var/log/caddy \
-        -v $PWD/singbox/config.json:/etc/sing-box/config.json:ro \
-        -v $PWD/singbox/logs:/var/log/sing-box \
-        aizhihuxiao/gtagod:latest
-    log_success "GTAGod 容器启动完成 (Caddy L4 + sing-box)"
+      -v "$PWD/gtagate/config.json:/etc/gtagate/config.json:ro" \
+      -v "$PWD/caddy/data:/data/caddy" \
+      -v "$PWD/caddy/config:/config" \
+      -v "$PWD/caddy/logs:/var/log/caddy" \
+      -v "$PWD/singbox/config.json:/etc/sing-box/config.json:ro" \
+      -v "$PWD/singbox/logs:/var/log/sing-box" \
+      "$gtagod_image"
+    log_success "GTAGod 容器启动完成 (gtagate L4 + gtacore)"
 else
-    log_error "sing-box 配置文件不存在: $PWD/singbox/config.json"
+    log_error "gtacore 配置文件不存在: $PWD/singbox/config.json"
     exit 1
 fi
 
@@ -1717,14 +1919,14 @@ if docker ps | grep -q caddy; then
     log_success "容器启动成功"
     docker logs caddy --tail 20
     
-    # 检查 sing-box (v4.0.0: 所有模式都运行 sing-box)
+    # 检查 gtacore (v0.0.1: 所有模式都运行 gtacore)
     echo ""
-    log_info "检查 sing-box 状态..."
+    log_info "检查 gtacore 状态..."
     sleep 3
-    if docker exec caddy pgrep -f sing-box >/dev/null 2>&1; then
-        log_success "sing-box 启动成功"
+    if docker exec caddy pgrep -x gtacore >/dev/null 2>&1; then
+        log_success "gtacore 启动成功"
     else
-        log_warning "sing-box 可能未启动，等待证书..."
+        log_warning "gtacore 可能未启动，等待证书..."
     fi
     
     # 等待证书 - 所有模式都包含 naive 入站，需要 TLS 证书
@@ -1754,15 +1956,15 @@ if docker ps | grep -q caddy; then
         log_warning "证书申请超时"
         log_info "容器将按配置自动重试，查看日志: docker logs caddy"
     else
-        # 证书申请成功后，检查 sing-box 是否需要重启
+        # 证书申请成功后，检查 gtacore 是否需要重启
         sleep 2
-        if ! docker exec caddy pgrep -f sing-box >/dev/null 2>&1; then
-            log_info "证书已就绪，等待容器自动拉起 sing-box..."
+        if ! docker exec caddy pgrep -x gtacore >/dev/null 2>&1; then
+            log_info "证书已就绪，等待容器自动拉起 gtacore..."
             sleep 5
-            if docker exec caddy pgrep -f sing-box >/dev/null 2>&1; then
-                log_success "sing-box 启动成功"
+            if docker exec caddy pgrep -x gtacore >/dev/null 2>&1; then
+                log_success "gtacore 启动成功"
             else
-                log_warning "sing-box 仍未启动，可尝试重启容器: docker restart caddy"
+                log_warning "gtacore 仍未启动，可尝试重启容器: docker restart caddy"
             fi
         fi
     fi
@@ -1777,12 +1979,12 @@ fi
 # =========================================
 if [ "$enable_watchtower" = "true" ]; then
   log_info "启动 Watchtower..."
-  docker pull containrrr/watchtower:latest
+  docker pull "$watchtower_image"
   docker run -d --name watchtower \
     --restart=unless-stopped \
     -e DOCKER_API_VERSION=1.44 \
     -v /var/run/docker.sock:/var/run/docker.sock \
-    containrrr/watchtower:latest --cleanup --interval 86400
+    "$watchtower_image" --cleanup --interval 86400
 else
   log_info "跳过 Watchtower 自动更新 (ENABLE_WATCHTOWER=false)"
 fi
@@ -1793,6 +1995,9 @@ fi
 if [ "$host_network_optimization" = "true" ]; then
   log_info "配置网络性能优化..."
   modprobe tcp_bbr 2>/dev/null || log_warning "BBR 模块加载失败"
+
+  # 迁移旧版本误写的无效 sysctl 键，避免 sysctl -p 直接失败
+  sed -i 's/^net\.ipv4\.tcp_notsent_max=.*/net.ipv4.tcp_notsent_lowat=131072/' /etc/sysctl.conf 2>/dev/null || true
 
   if ! grep -q "# GTAGod BBR" /etc/sysctl.conf; then
 cat >> /etc/sysctl.conf << 'SYSCTL'
@@ -1824,8 +2029,11 @@ net.ipv4.tcp_keepalive_probes=3
 net.ipv4.tcp_fastopen=3
 net.ipv4.tcp_slow_start_after_idle=0
 net.ipv4.tcp_mtu_probing=1
-net.ipv4.tcp_notsent_max=16384
+net.ipv4.tcp_notsent_lowat=131072
 net.ipv4.ip_local_port_range=1024 65535
+
+# 文件描述符容量
+fs.file-max=2097152
 
 # 转发
 net.ipv4.ip_forward=1
@@ -1834,6 +2042,7 @@ SYSCTL
   fi
 
   sysctl -p > /dev/null
+  sysctl -w net.netfilter.nf_conntrack_max=1048576 >/dev/null 2>&1 || log_warning "nf_conntrack_max 设置失败，可能未加载 conntrack 模块"
   log_success "网络优化已应用"
 else
   log_info "跳过宿主机网络优化 (HOST_NETWORK_OPTIMIZATION=false)"
@@ -1881,7 +2090,9 @@ cat > ./caddy/deploy-info.txt << EOF
 # 生成时间: $(date)
 # 脚本版本: v${VERSION}
 # 部署模式: ${DEPLOY_MODE}
-# 架构: sing-box 1.13+ (原生 naive inbound)
+部署配置档: ${deployment_profile}
+# 架构: gtagate (L4) + gtacore (原生 naive inbound)
+镜像: ${gtagod_image}
 
 域名: ${domain}
 ACME CA: ${SELECTED_CA_NAME}
@@ -1893,18 +2104,24 @@ MPTCP (tcp_multi_path): ${tcp_multi_path}
 自动安装 Docker: ${auto_install_docker}
 宿主机 IPv6 调整: ${host_ipv6_tuning}
 宿主机 DNS 调整: ${host_dns_tuning}
+宿主机 DNS options: ${host_dns_options}
+gtacore DNS strategy: ${dns_strategy}
 宿主机网络优化: ${host_network_optimization}
 宿主机防火墙管理: ${host_firewall_management}
 宿主机内核版本: $(uname -r 2>/dev/null || echo unknown)
 Watchtower 自动更新: ${enable_watchtower}
+Watchtower 镜像: ${watchtower_image}
 容器 GOMEMLIMIT: ${container_gomemlimit}
+容器内存限制: ${container_memory_limit}
+容器 CPU 限制: ${container_cpus:-Docker 默认}
+容器只读根文件系统: ${container_read_only}
 容器 PIDs 限制: ${container_pids_limit}
 容器 /tmp tmpfs: ${container_tmpfs_size}
 容器日志轮转: ${container_log_max_size} x ${container_log_max_file}
 NaiveProxy:
   用户: ${naive_user}
   域名: *.${domain} (任意子域名)
-  引擎: sing-box 1.13+ native naive inbound
+  引擎: gtacore native naive inbound
 EOF
 
 if [ "$enable_anytls" = "true" ]; then
@@ -1938,7 +2155,9 @@ log_success "部署完成!"
 echo "========================================="
 echo "脚本版本: v${VERSION}"
 echo "部署模式: ${DEPLOY_MODE}"
-echo "架构: sing-box 1.13+ (原生支持 naive/anytls/anyreality)"
+echo "部署配置档: ${deployment_profile}"
+echo "镜像: ${gtagod_image}"
+echo "架构: gtagate (L4) + gtacore (原生支持 naive/anytls/anyreality)"
 echo ""
 echo "NaiveProxy:"
 echo "   协议: naive+https"
