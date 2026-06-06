@@ -55,10 +55,13 @@ LABEL maintainer="gtagod" \
     version="0.0.1"
 
 # 一次性安装所有依赖并创建目录，减少镜像层
+# procps 提供 pgrep/ps：healthcheck.sh 与 run.sh 的存活检测统一用 `pgrep -x gtagate/gtacore`，
+# 缺失时 pgrep 返回 127 会被误判为“进程未运行”，导致容器永远 unhealthy。
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         ca-certificates \
         libcap2-bin \
+        procps \
         tzdata \
         jq && \
     rm -rf /var/lib/apt/lists/* && \

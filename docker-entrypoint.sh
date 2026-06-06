@@ -111,9 +111,40 @@ migrate_legacy_dns_servers() {
     return 0
 }
 
+enforce_ipv4_only_without_ipv6() {
+    # 无全局 IPv6 的主机（多数云 VM 默认如此，包括未显式启用 IPv6 的 Azure VM）上，
+    # 解析 AAAA 会让 gtacore 直连 IPv6 目标并必然失败（Network is unreachable, os error 101），
+    # 徒增 IPv4 回退前的延迟。此处自动把 DNS 解析策略降级为 ipv4_only。
+    # 检测方式：读 /proc/net/if_inet6（scope 列 == 00 即存在全局 IPv6 地址），无需 iproute2。
+    if awk '$4 == "00" { found = 1 } END { exit(found ? 0 : 1) }' /proc/net/if_inet6 2>/dev/null; then
+        return 0
+    fi
+
+    if ! jq -e 'has("dns")' /tmp/sing-box-config.json >/dev/null 2>&1; then
+        return 0
+    fi
+
+    _dns_strategy=$(jq -r '.dns.strategy // "unset"' /tmp/sing-box-config.json 2>/dev/null)
+    if [ "$_dns_strategy" = "ipv4_only" ]; then
+        echo "ℹ️  未检测到全局 IPv6，DNS strategy 已是 ipv4_only"
+        return 0
+    fi
+
+    echo "⚠️  未检测到全局 IPv6 地址，将 DNS strategy 由 ${_dns_strategy} 强制为 ipv4_only（避免直连不可达的 IPv6）"
+    if jq '.dns.strategy = "ipv4_only"' /tmp/sing-box-config.json > /tmp/sing-box-config.json.ipv4 \
+        && mv /tmp/sing-box-config.json.ipv4 /tmp/sing-box-config.json; then
+        echo "✅ DNS strategy 已设为 ipv4_only"
+    else
+        echo "⚠️  设置 ipv4_only 失败，继续使用 ${_dns_strategy}"
+        rm -f /tmp/sing-box-config.json.ipv4
+    fi
+}
+
 if ! migrate_legacy_dns_servers; then
     exit 1
 fi
+
+enforce_ipv4_only_without_ipv6
 
 # =========================================
 # 检测配置类型 (使用 jq 精确解析 JSON)

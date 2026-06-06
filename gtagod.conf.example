@@ -130,7 +130,9 @@ DNS_TERTIARY_SERVER="9.9.9.9"
 
 # gtacore DNS 解析策略
 # 可选值: prefer_ipv4, prefer_ipv6, ipv4_only, ipv6_only
-# azure 默认 prefer_ipv4，sakura-jp/legacy 默认 ipv4_only
+# 多数云 VM（含未显式启用 IPv6 的 Azure VM）默认无全局 IPv6；
+# 容器启动时若检测到主机无全局 IPv6，会自动将本策略降级为 ipv4_only（避免直连不可达 IPv6），
+# 故 prefer_ipv4 在任何主机都安全；只有确实启用了 IPv6 的主机才会真正走 IPv6。
 DNS_STRATEGY="prefer_ipv4"
 
 # =========================================

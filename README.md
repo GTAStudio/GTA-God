@@ -1,27 +1,27 @@
-# GTAGod - Caddy NaiveProxy + AnyTLS + AnyReality
+# GTAGod - NaiveProxy + AnyTLS + AnyReality
 
-一键部署 Caddy + NaiveProxy + AnyTLS + AnyReality 的 Docker 解决方案。
+一键部署 NaiveProxy + AnyTLS + AnyReality 的 Docker 解决方案。
 
-支持多协议共享 443 端口，通过 Caddy Layer4 SNI 分流。
+支持多协议共享 443 端口，由 gtagate (Rust) 进行 Layer4 SNI 分流。
 
-## 🎉 v4.1 更新
+## 🎉 v0.0.1 更新
 
-- **依赖全面升级** - Go 1.26, Alpine 3.23, xcaddy v0.4.5, Caddy v2.11.2, sing-box 1.13.11
-- **sing-box 1.13+ 原生 naive inbound** - 移除 Caddy forwardproxy 依赖
-- **kernel_tx (kTLS)** - 启用内核级 TLS 发送加速，降低 CPU 开销
-- **配置模板修复** - 兼容 sing-box 1.13.11，并迁移到 1.14 兼容 DNS 写法
-- **容器稳定性提升** - 修复多个启动问题
+- **全 Rust 架构** - 代理核心由 gtacore (Rust，sing-box 兼容) 接管，网关由 gtagate (Rust) 接管，彻底移除 Caddy 与 sing-box
+- **gtagate** - 负责 L4 SNI 分流 + ACME (DNS-01) 证书申请，取代 Caddy
+- **gtacore** - 负责 naive + anytls + anyreality，取代 sing-box，内嵌 libutls sidecar（单文件）
+- **镜像基仓** - 运行阶段改用 debian:12-slim (glibc)，高并发吸吞优于 musl
+- **配置模板烘进镜像** - 服务器端只需 `run.sh` + `gtagod.conf`，模板由 run.sh 从镜像提取
 
 ## 特性
 
-- ✅ **NaiveProxy** - sing-box 1.13+ 原生 naive inbound，伪装成正常 HTTPS 流量
-- ✅ **AnyTLS** - sing-box 的 TLS 隧道协议，需要证书
+- ✅ **NaiveProxy** - gtacore 原生 naive inbound，伪装成正常 HTTPS 流量
+- ✅ **AnyTLS** - gtacore 的 TLS 隧道协议，需要证书
 - ✅ **AnyReality** - AnyTLS + Reality TLS，无需证书，伪装知名网站
 - ✅ **自动证书** - 基于 Cloudflare DNS 的通配符证书，支持多 CA 自动切换
-- ✅ **443 共享** - 所有协议通过 Caddy L4 共享 443 端口
+- ✅ **443 共享** - 所有协议通过 gtagate L4 共享 443 端口
 - ✅ **一键部署** - 交互式脚本，3 分钟完成部署
 
-## 架构图 (v4.0)
+## 架构图
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────┐
@@ -30,7 +30,7 @@
 │    Internet ──▶ 外部端口 443 (0.0.0.0:443)                                 │
 │                         │                                                  │
 │              ┌──────────┴──────────┐                                       │
-│              │   Caddy Layer4      │                                       │
+│              │   gtagate Layer4    │                                       │
 │              │   SNI 分流           │                                       │
 │              └──────────┬──────────┘                                       │
 │         ┌───────────────┼───────────────┐                                  │
@@ -42,7 +42,7 @@
 │  │     │      │  │     │      │  │       │        │                        │
 │  │     ▼      │  │     ▼      │  │       ▼        │                        │
 │  │ :8445      │  │ :8444      │  │ :8443          │                        │
-│  │ (sing-box) │  │ (sing-box) │  │ (sing-box)     │                        │
+│  │ (sing-box) │  │ (sing-box) │  │ (gtacore)      │                        │
 │  │  AnyTLS    │  │ AnyReality │  │  Naive         │                        │
 │  └────────────┘  └────────────┘  └────────────────┘                        │
 │         │               │               │                                  │
@@ -50,7 +50,7 @@
 │                         │                                                  │
 │                         ▼                                                  │
 │                ┌─────────────────┐                                         │
-│                │    sing-box     │                                         │
+│                │    gtacore      │                                         │
 │                │  Direct Outbound│──────────────▶ Internet                 │
 │                └─────────────────┘                                         │
 └────────────────────────────────────────────────────────────────────────────┘
@@ -66,13 +66,13 @@
 
 ## 部署前必读
 
-- `run.sh` 默认仍会按这个项目的既有部署假设工作：自动安装 Docker、关闭宿主机防火墙、关闭宿主机 IPv6、调整 DNS 到 IPv4 优先，并启动 `watchtower`。
-- `run.sh` 默认也会应用宿主机网络优化，包括 BBR 和一组 TCP/sysctl 调优，以性能和稳定性优先。
-- Docker 容器共享宿主机 Linux 内核；镜像基础层只能更新容器内 Alpine 用户态包。若你要修复 Linux 内核漏洞，必须升级宿主机系统内核并重启 VPS。
-- Dockerfile 已固定到当前最新稳定 Alpine 3.23，并在 builder/runtime 阶段执行 `apk upgrade --no-cache`，让镜像构建时拉取该发行版最新安全修复。
-- 显式开关还保留着；如果你确实有特殊环境，可以再通过 `HOST_IPV6_TUNING`、`HOST_DNS_TUNING`、`HOST_NETWORK_OPTIMIZATION`、`HOST_FIREWALL_MANAGEMENT`、`PREPARE_HOST_SYSTEM`、`AUTO_INSTALL_DOCKER`、`ENABLE_WATCHTOWER` 手动改回去。
+- `run.sh` 默认使用 `DEPLOY_PROFILE="azure"`：不主动修改宿主机 DNS/IPv6，适合 Azure FW/NSG 前置环境；Sakura/JP UDP DNS 丢包环境可切到 `sakura-jp`。
+- `run.sh` 默认仍会自动安装 Docker、应用宿主机网络优化，并按配置管理宿主机防火墙；`ENABLE_WATCHTOWER` 默认关闭。
+- Docker 容器共享宿主机 Linux 内核；镜像基础层只能更新容器内 Debian 用户态包。若你要修复 Linux 内核漏洞，必须升级宿主机系统内核并重启 VPS。
+- 运行阶段镜像基于 debian:12-slim (glibc)，内置 gtagate（网关/证书）与 gtacore（代理核心，内嵌 libutls）两个 Rust 二进制。
+- 显式开关还保留着；如果你确实有特殊环境，可以通过 `DEPLOY_PROFILE`、`HOST_IPV6_TUNING`、`HOST_DNS_TUNING`、`HOST_NETWORK_OPTIMIZATION`、`HOST_FIREWALL_MANAGEMENT`、`PREPARE_HOST_SYSTEM`、`AUTO_INSTALL_DOCKER`、`ENABLE_WATCHTOWER` 手动调整。
 - `gtagod.conf` 应按纯 `KEY=value` 配置文件维护，不要写 shell 语句、命令替换或函数，也不要直接复用来路不明的配置。
-- 部署过程中会把域名、Token、认证信息和 Reality 密钥写入生成配置；`gtagod.conf`、`caddy/`、`singbox/` 目录都应视为敏感数据。
+- 部署过程中会把域名、Token、认证信息和 Reality 密钥写入生成配置；`gtagod.conf`、`caddy/`、`singbox/`、`gtagate/` 目录都应视为敏感数据。
 
 ### 方式一: 配置文件部署 (推荐)
 
@@ -117,9 +117,9 @@ chmod +x run.sh
 | `anyreality` | 443 | NaiveProxy + AnyReality (L4 SNI 分流) |
 | `l4` | **443** | **全部启用，443 共享** (推荐) |
 
-> **架构说明 (v4.0)**: 
-> - **全部协议共享 443 端口**，通过 Caddy Layer4 SNI 分流
-> - **全部代理由 sing-box 1.13+ 处理** (包括 NaiveProxy)
+> **架构说明**: 
+> - **全部协议共享 443 端口**，通过 gtagate Layer4 SNI 分流
+> - **全部代理由 gtacore 处理** (包括 NaiveProxy)
 > - NaiveProxy: 任意 `*.domain.com` 子域名 (默认路由)
 > - AnyTLS: 特定 SNI (如 `api.domain.com`)
 > - AnyReality: 特定 SNI (如 `www.amazon.com`)
@@ -130,16 +130,15 @@ chmod +x run.sh
 | 文件 | 说明 |
 |------|-----|
 | `run.sh` | 统一部署脚本 |
+| `setup-warp.sh` | 可选 WARP 出站脚本 |
 | `gtagod.conf.example` | 配置文件模板 |
 | `gtagod.conf` | 个人配置文件 (敏感，已在 .gitignore) |
 | `Dockerfile` | Docker 构建文件 |
 | `docker-entrypoint.sh` | 容器入口脚本 |
-| `Caddyfile.singbox.example` | Caddy L4 配置模板 (sing-box 统一架构) |
-| `Caddyfile.reality.example` | Caddy 配置模板 (旧版，兼容) |
-| `singbox-config.l4.example` | sing-box L4 三合一配置模板 |
-| `singbox-config.naive.example` | sing-box Naive-only 配置模板 |
-| `singbox-config.anytls.example` | sing-box AnyTLS 配置模板 |
-| `singbox-config.anyreality.example` | sing-box AnyReality 配置模板 (旧版，兼容) |
+| `singbox-config.l4.example` | gtacore L4 三合一配置模板 |
+| `singbox-config.naive.example` | gtacore Naive-only 配置模板 |
+| `singbox-config.anytls-combo.example` | gtacore Naive + AnyTLS 配置模板 |
+| `singbox-config.anyreality-combo.example` | gtacore Naive + AnyReality 配置模板 |
 
 ## 高级配置
 
@@ -147,13 +146,19 @@ chmod +x run.sh
 
 - `PREPARE_HOST_SYSTEM`：是否初始化宿主机时区、依赖和时间同步，默认开启。
 - 若系统升级包含 Linux 内核更新，必须重启宿主机后才会生效；`run.sh` 会提示 reboot-required 标记。
+- `DEPLOY_PROFILE`：部署配置档，默认 `azure`；`sakura-jp` 会启用 IPv4/DNS TCP 特化。
 - `AUTO_INSTALL_DOCKER`：未安装 Docker 时是否自动安装，默认开启。
-- `HOST_IPV6_TUNING`：是否真正修改宿主机 IPv6 配置，默认开启。
-- `HOST_DNS_TUNING`：是否修改宿主机 `/etc/gai.conf` 和 `/etc/resolv.conf`，默认开启。
+- `HOST_IPV6_TUNING`：是否真正修改宿主机 IPv6 配置，Azure 默认关闭。
+- `HOST_DNS_TUNING`：是否修改宿主机 `/etc/gai.conf` 和 `/etc/resolv.conf`，Azure 默认关闭。
+- `DNS_STRATEGY`：gtacore DNS 解析策略，Azure 默认 `prefer_ipv4`，Sakura/JP 默认 `ipv4_only`。容器启动时若检测到主机无全局 IPv6（多数云 VM 默认如此），会自动将该策略降级为 `ipv4_only`，避免直连不可达的 IPv6 增加延迟。
 - `HOST_NETWORK_OPTIMIZATION`：是否写入 BBR / TCP sysctl 优化，默认开启。
 - `HOST_FIREWALL_MANAGEMENT`：是否禁用宿主机防火墙并清空 iptables，默认开启。
-- `ENABLE_WATCHTOWER`：是否启动 Watchtower 自动更新容器，默认开启。
+- `ENABLE_WATCHTOWER`：是否启动 Watchtower 自动更新容器，默认关闭。
+- `GTAGOD_IMAGE`：部署使用的镜像，默认 `aizhihuxiao/gtagod:latest`。
 - `CONTAINER_GOMEMLIMIT`：容器内 Go 运行时内存上限，默认 `384MiB`。
+- `CONTAINER_MEMORY_LIMIT`：Docker cgroup 内存限制，默认 `512m`。
+- `CONTAINER_CPUS`：Docker CPU 限制，留空表示 Docker 默认值。
+- `CONTAINER_READ_ONLY`：是否启用容器只读根文件系统，默认开启。
 - `CONTAINER_PIDS_LIMIT`：容器进程数限制，默认 `512`。
 - `CONTAINER_TMPFS_SIZE`：容器 `/tmp` 的 tmpfs 大小，默认 `64m`。
 - `CONTAINER_LOG_MAX_SIZE`：Docker 日志轮转单文件大小，默认 `10m`。
@@ -164,20 +169,21 @@ chmod +x run.sh
 - `CERT_RETRY_INTERVAL`：证书重试间隔（秒），默认 30。
 - `CERT_RETRY_MAX`：证书重试次数上限（0 表示无限重试）。
 
-## 项目体检结论 (2026-03-11)
+## 项目体检结论 (2026-06-04)
 
 这部分基于脚本、Dockerfile、配置模板和 CI 文件的实际检查整理，不以旧文档描述作为依据。
 
 - 当前主链路是成立的：镜像构建、容器入口脚本、L4 分流模板和 GitHub Actions 的验证逻辑基本一致。
-- Caddy 当前建议至少跟进到 `v2.11.2`；`v2.11.1` 之后官方补了 bugfix 和安全修复，尤其是若未来恢复 HTTP 反代或 `forward_auth` 场景时更有必要同步。
-- 示例配置里原先使用的 `dns.rules -> outbound: any` 已经是 1.12 起废弃、1.14 将移除的写法；现在应统一迁移到 `route.default_domain_resolver`。
-- `Caddyfile.singbox.example` 里原先全局 `acme_dns` 和站点内 `tls { dns ... }` 是重复配置；按官方文档保留全局 DNS 提供者即可，后续若要启用 ECH 也能直接复用。
-- `build-and-push.sh` 原先的本地镜像校验命令没有覆盖镜像 `ENTRYPOINT`，实际上不能正确执行 `caddy version` 和 `sing-box version`；这一点已修正。
-- `docker-entrypoint.sh` 仅校验 Caddyfile 还不够，启动前还应执行 `sing-box check`；这样能在证书就绪后先拦住配置错误，而不是等进程直接拉起失败。
-- `run.sh` 现在把宿主机动作拆成了显式开关，但默认值仍保持项目原有部署前提：自动装 Docker、关闭防火墙、关闭 IPv6、应用网络优化、启动 Watchtower；只有在配置中主动关闭时，才会跳过这些步骤。
+- 网关已从 Caddy 迁移到 gtagate (Rust)，代理核心已从 sing-box 迁移到 gtacore (Rust)；gtacore 兼容 sing-box 配置格式，模板沿用 `singbox-config.*.example`。
+- gtacore 二进制（含内嵌 libutls sidecar）以预构建产物 `bin/gtacore` 随仓库提供，Dockerfile 直接 `COPY` 进镜像。
+- gtacore 无 SIGHUP 热重载：证书续期时 `docker-entrypoint.sh` 会重启 gtacore 进程，而不是发送 HUP 信号。
+- gtacore 控制面监听 `127.0.0.1:19810`，仅 loopback，容器不暴露该端口，并由入口脚本生成一次性 token 文件鉴权。
+- 示例配置已统一迁移到 `route.default_domain_resolver` 与 typed DNS（`type: https`）写法，避免使用已废弃的 `dns.rules -> outbound`。
+- `docker-entrypoint.sh` 启动 gtacore 前会执行 `gtacore sing-box check -c`，在证书就绪后先拦住配置错误，而不是等进程直接拉起失败。
+- `run.sh` 现在把宿主机动作拆成了显式开关，并通过 `DEPLOY_PROFILE` 区分 Azure 默认值与 Sakura/JP 特化默认值。
 - `run.sh` 当前已不再对 `caddy/` 和 `singbox/` 目录执行 `chmod -R 777`，改为较收敛的目录和文件权限。
 - 容器运行参数还有一轮收敛：现在会用 `--init` 处理僵尸进程、把 `/tmp` 挂成 tmpfs、开启 `no-new-privileges`，并把 `GOMEMLIMIT`、日志轮转和 PIDs 限制做成可配置项。
-- `run.sh` 现在会在真正部署前自动执行一轮 preflight，自检 root 权限、Cloudflare Token、域名解析、模板占位符、JSON 格式、关键端口占用、目录写权限，以及 `GOMEMLIMIT`、PIDs、tmpfs、日志轮转这些容器参数的取值；如果本地镜像已存在，还会调用镜像内的 `caddy` 和 `sing-box` 做语法级校验，并检查 Docker Hub 上的镜像可达性。也可以单独运行 `./run.sh --preflight` 只做检查不部署。
+- `run.sh` 现在会在真正部署前自动执行一轮 preflight，自检 root 权限、Cloudflare Token、域名解析、模板占位符、JSON 格式、关键端口占用、目录写权限，以及 `GOMEMLIMIT`、内存、CPU、PIDs、tmpfs、日志轮转这些容器参数的取值；如果本地镜像已存在，还会调用镜像内的 `gtagate` 和 `gtacore` 做语法级校验，并检查 Docker Hub 上的镜像可达性。也可以单独运行 `./run.sh --preflight` 做纯检查，不修改宿主机、不生成部署文件。
 - `run.sh` 现在不再 `source` 配置文件，而是只按白名单解析 `KEY=value` 项，避免把 `gtagod.conf` 当成 shell 直接执行。
 - `run.sh` 仍通过 `curl https://get.docker.com | sh` 安装 Docker。对于追求可审计和可重复部署的环境，后续建议切换到发行版包源或明确版本安装。
 - `gtagod.conf` 虽然默认被 `.gitignore` 忽略，但里面通常包含 Cloudflare Token、Naive 凭据和 Reality 私钥，仍建议长期放在仓库目录之外，或改用环境变量、单独密钥文件管理。
@@ -186,7 +192,7 @@ chmod +x run.sh
 
 1. 把模板替换从 `sed` 逐步收敛到更可控的方式，例如结构化模板渲染。
 2. 继续减少明文凭据落盘范围，例如把 Token 和私钥改成运行时注入，而不是长期保存在工作目录。
-3. 如果未来要跟进 1.14 正式版，优先关注 DNS 解析链路和 deprecated 项清理，不建议提前切到 1.14 alpha 做生产默认版本。
+3. 为 gtacore 建立独立的镜像构建/发布流水线，把 `bin/gtacore` 预构建产物纳入可复现的 CI，而不是手工更新。
 
 ## 文档
 
@@ -194,6 +200,35 @@ chmod +x run.sh
 - [FRIEND-GUIDE.md](FRIEND-GUIDE.md) - 朋友部署指南
 
 ## 版本历史
+
+### v0.0.1 (2026-06-04)
+- 🦀 **全 Rust 架构**:
+  - 网关 Caddy → **gtagate** (Rust)：L4 SNI 分流 + ACME (DNS-01) 证书申请
+  - 代理核心 sing-box → **gtacore** (Rust，sing-box 配置兼容)：naive + anytls + anyreality
+  - gtacore 内嵌 libutls sidecar，单文件二进制（含 anyreality 支持）
+- 🐧 **运行镜像基仓** Alpine → **debian:12-slim** (glibc)，高并发吞吐优于 musl
+- 📦 **预构建产物** `bin/gtacore` 随仓库提供，Dockerfile 直接 COPY，服务器端只需 `run.sh` + `gtagod.conf`
+- 🔁 **证书续期** 改为重启 gtacore 进程（gtacore 无 SIGHUP 热重载）
+- 🧹 移除 Caddyfile.* 及旧版 sing-box 单协议模板
+
+### v4.2.0 (2026-05-31)
+- 🔧 **依赖升级到官方最新稳定版**:
+  - Go 1.26 → **Go 1.26.3**
+  - Caddy v2.11.2 → **v2.11.3**
+  - sing-box 1.13.11 → **1.13.12**
+  - 固定 Caddy Cloudflare DNS 插件 v0.2.4 和 caddy-l4 v0.1.1
+- 🛡️ **稳定性默认值优化**:
+  - 默认使用镜像 `aizhihuxiao/gtagod:latest`
+  - 默认关闭 Watchtower 自动更新，显式开启时使用固定 Watchtower 镜像
+  - 增加 Docker 内存/CPU 限制和只读根文件系统配置
+- 🌐 **部署配置档**:
+  - 默认 `azure`，不主动修改宿主机 DNS/IPv6
+  - 新增 `sakura-jp`，用于 UDP DNS 丢包环境的 TCP DNS 特化
+- 🐛 **部署脚本修复**:
+  - `./run.sh --preflight` 现在不会修改宿主机或生成部署文件
+  - Caddy L4 路由只生成已启用协议，避免未启用协议占用 SNI
+  - 修复无效 sysctl 键 `tcp_notsent_max`
+  - healthcheck 在 sing-box 必须运行时会检查 sing-box 进程
 
 ### v4.1.0 (2026-01-01)
 - 🔧 **依赖升级到最新稳定版**:
@@ -251,16 +286,16 @@ ls -la caddy/data/caddy/certificates/
 docker restart caddy
 ```
 
-3. **确认 sing-box 启动成功**：
+3. **确认 gtacore 启动成功**：
 ```bash
-docker exec caddy pgrep -f sing-box
+docker exec caddy pgrep -x gtacore
 ```
 
 > ⚠️ **重要提示**：脚本默认等待证书 180 秒，超时后容器会按配置自动重试（无需手动重启）。如需调整等待/重试策略，请修改 `CERT_WAIT_MAX`、`CERT_RETRY_INTERVAL`、`CERT_RETRY_MAX`。
 
 ### 证书申请失败？
 
-Caddy 支持多个 CA:
+gtagate 支持多个 CA:
 1. ZeroSSL (默认)
 2. Let's Encrypt
 
@@ -274,9 +309,9 @@ Caddy 支持多个 CA:
 FORCE_ACME_CA=letsencrypt  # 或 zerossl
 ```
 
-### sing-box 未启动？
+### gtacore 未启动？
 
-AnyTLS 需要证书才能启动。如果 sing-box 报错找不到证书文件：
+AnyTLS 需要证书才能启动。如果 gtacore 报错找不到证书文件：
 
 1. 确认证书已申请成功
 2. 重启容器：`docker restart caddy`
