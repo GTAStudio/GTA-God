@@ -21,6 +21,8 @@
 # =========================================
 
 VERSION="0.0.1"
+SINGBOX_MOUNTED_CONFIG="/etc/sing-box/config.json"
+SINGBOX_RUNTIME_CONFIG="/tmp/sing-box-config.json"
 SINGBOX_LOG_FILE="/var/log/sing-box/sing-box.log"
 GTAGATE_CONFIG="/etc/gtagate/config.json"
 
@@ -54,22 +56,40 @@ rm -f /tmp/gtagate-validate.log
 # =========================================
 # 检查 sing-box 配置
 # =========================================
-if [ ! -f "/etc/sing-box/config.json" ]; then
-    echo "❌ ERROR: /etc/sing-box/config.json not found!"
-    echo "Please mount your sing-box config to /etc/sing-box/config.json"
+if [ ! -f "$SINGBOX_MOUNTED_CONFIG" ]; then
+    echo "❌ ERROR: $SINGBOX_MOUNTED_CONFIG not found!"
+    echo "Please mount your sing-box config to $SINGBOX_MOUNTED_CONFIG"
     exit 1
 fi
 
 echo "📝 sing-box config found"
 
-# 复制配置到可写位置
-if ! cp /etc/sing-box/config.json /tmp/sing-box-config.json; then
-    echo "❌ ERROR: Failed to copy sing-box config to /tmp"
+# 复制到可写运行时配置。entrypoint 后续会执行兼容性迁移、IPv4 策略修正、证书路径更新，
+# 因此不能直接修改只读挂载配置。若挂载配置不可读，必须在启动早期明确失败。
+if ! cat "$SINGBOX_MOUNTED_CONFIG" > "$SINGBOX_RUNTIME_CONFIG"; then
+    echo "❌ ERROR: Cannot read $SINGBOX_MOUNTED_CONFIG or write $SINGBOX_RUNTIME_CONFIG"
+    echo "Please check host permissions. Recommended: chmod 644 singbox/config.json"
+    ls -ld /etc/sing-box "$SINGBOX_MOUNTED_CONFIG" /tmp 2>/dev/null || true
     exit 1
 fi
 
+if ! chmod 0644 "$SINGBOX_RUNTIME_CONFIG"; then
+    echo "❌ ERROR: Failed to set readable permissions on $SINGBOX_RUNTIME_CONFIG"
+    exit 1
+fi
+
+if ! jq empty "$SINGBOX_RUNTIME_CONFIG" >/tmp/sing-box-json-validate.log 2>&1; then
+    echo "❌ ERROR: $SINGBOX_MOUNTED_CONFIG is not valid JSON"
+    cat /tmp/sing-box-json-validate.log
+    rm -f /tmp/sing-box-json-validate.log
+    exit 1
+fi
+rm -f /tmp/sing-box-json-validate.log
+
+echo "✅ Runtime sing-box config prepared at $SINGBOX_RUNTIME_CONFIG"
+
 migrate_legacy_dns_servers() {
-    if ! jq -e 'any(.dns.servers[]?; (.address? != null) and (.address | type == "string"))' /tmp/sing-box-config.json >/dev/null 2>&1; then
+    if ! jq -e 'any(.dns.servers[]?; (.address? != null) and (.address | type == "string"))' "$SINGBOX_RUNTIME_CONFIG" >/dev/null 2>&1; then
         echo "✅ sing-box DNS server format is current"
         return 0
     fi
@@ -89,23 +109,25 @@ migrate_legacy_dns_servers() {
             .
           end;
         .dns.servers |= map(migrate_dns_server)
-    ' /tmp/sing-box-config.json > /tmp/sing-box-config.json.migrated; then
+    ' "$SINGBOX_RUNTIME_CONFIG" > "${SINGBOX_RUNTIME_CONFIG}.migrated"; then
         echo "❌ Failed to migrate legacy DNS server format"
-        rm -f /tmp/sing-box-config.json.migrated
+        rm -f "${SINGBOX_RUNTIME_CONFIG}.migrated"
         return 1
     fi
 
-    if jq -e 'any(.dns.servers[]?; .address? != null)' /tmp/sing-box-config.json.migrated >/dev/null 2>&1; then
+    if jq -e 'any(.dns.servers[]?; .address? != null)' "${SINGBOX_RUNTIME_CONFIG}.migrated" >/dev/null 2>&1; then
         echo "❌ Found unsupported legacy DNS server entries after migration"
-        rm -f /tmp/sing-box-config.json.migrated
+        rm -f "${SINGBOX_RUNTIME_CONFIG}.migrated"
         return 1
     fi
 
-    if ! mv /tmp/sing-box-config.json.migrated /tmp/sing-box-config.json; then
+    if ! mv "${SINGBOX_RUNTIME_CONFIG}.migrated" "$SINGBOX_RUNTIME_CONFIG"; then
         echo "❌ Failed to replace sing-box config after DNS migration"
-        rm -f /tmp/sing-box-config.json.migrated
+        rm -f "${SINGBOX_RUNTIME_CONFIG}.migrated"
         return 1
     fi
+
+    chmod 0644 "$SINGBOX_RUNTIME_CONFIG" 2>/dev/null || true
 
     echo "✅ Legacy sing-box DNS servers migrated to typed HTTPS format"
     return 0
@@ -120,23 +142,24 @@ enforce_ipv4_only_without_ipv6() {
         return 0
     fi
 
-    if ! jq -e 'has("dns")' /tmp/sing-box-config.json >/dev/null 2>&1; then
+    if ! jq -e 'has("dns")' "$SINGBOX_RUNTIME_CONFIG" >/dev/null 2>&1; then
         return 0
     fi
 
-    _dns_strategy=$(jq -r '.dns.strategy // "unset"' /tmp/sing-box-config.json 2>/dev/null)
+    _dns_strategy=$(jq -r '.dns.strategy // "unset"' "$SINGBOX_RUNTIME_CONFIG" 2>/dev/null)
     if [ "$_dns_strategy" = "ipv4_only" ]; then
         echo "ℹ️  未检测到全局 IPv6，DNS strategy 已是 ipv4_only"
         return 0
     fi
 
     echo "⚠️  未检测到全局 IPv6 地址，将 DNS strategy 由 ${_dns_strategy} 强制为 ipv4_only（避免直连不可达的 IPv6）"
-    if jq '.dns.strategy = "ipv4_only"' /tmp/sing-box-config.json > /tmp/sing-box-config.json.ipv4 \
-        && mv /tmp/sing-box-config.json.ipv4 /tmp/sing-box-config.json; then
+    if jq '.dns.strategy = "ipv4_only"' "$SINGBOX_RUNTIME_CONFIG" > "${SINGBOX_RUNTIME_CONFIG}.ipv4" \
+        && mv "${SINGBOX_RUNTIME_CONFIG}.ipv4" "$SINGBOX_RUNTIME_CONFIG"; then
+        chmod 0644 "$SINGBOX_RUNTIME_CONFIG" 2>/dev/null || true
         echo "✅ DNS strategy 已设为 ipv4_only"
     else
         echo "⚠️  设置 ipv4_only 失败，继续使用 ${_dns_strategy}"
-        rm -f /tmp/sing-box-config.json.ipv4
+        rm -f "${SINGBOX_RUNTIME_CONFIG}.ipv4"
     fi
 }
 
@@ -154,23 +177,23 @@ HAS_ANYTLS=false
 HAS_ANYREALITY=false
 NEEDS_CERT=false
 
-if jq -e '.inbounds[]? | select(.type == "naive")' /tmp/sing-box-config.json >/dev/null 2>&1; then
+if jq -e '.inbounds[]? | select(.type == "naive")' "$SINGBOX_RUNTIME_CONFIG" >/dev/null 2>&1; then
     HAS_NAIVE=true
     echo "✅ Detected NaiveProxy inbound"
 fi
 
-if jq -e '.inbounds[]? | select(.type == "anytls")' /tmp/sing-box-config.json >/dev/null 2>&1; then
+if jq -e '.inbounds[]? | select(.type == "anytls")' "$SINGBOX_RUNTIME_CONFIG" >/dev/null 2>&1; then
     HAS_ANYTLS=true
     echo "✅ Detected AnyTLS inbound"
 fi
 
-if jq -e '.inbounds[]? | select(.tls?.reality?.enabled == true and .tls?.reality?.private_key != null)' /tmp/sing-box-config.json >/dev/null 2>&1; then
+if jq -e '.inbounds[]? | select(.tls?.reality?.enabled == true and .tls?.reality?.private_key != null)' "$SINGBOX_RUNTIME_CONFIG" >/dev/null 2>&1; then
     HAS_ANYREALITY=true
     echo "✅ Detected AnyReality inbound"
 fi
 
 # 检测是否需要证书 (naive 和非 reality 的 anytls 都需要证书)
-if jq -e '.inbounds[]? | select(.tls?.certificate_path != null)' /tmp/sing-box-config.json >/dev/null 2>&1; then
+if jq -e '.inbounds[]? | select(.tls?.certificate_path != null)' "$SINGBOX_RUNTIME_CONFIG" >/dev/null 2>&1; then
     NEEDS_CERT=true
     echo "📋 Certificate required for TLS inbounds"
 fi
@@ -298,7 +321,7 @@ reload_singbox() {
 validate_singbox_config() {
     VALIDATE_LOG="/tmp/sing-box-check.log"
 
-    if gtacore sing-box check -c /tmp/sing-box-config.json >"$VALIDATE_LOG" 2>&1; then
+    if gtacore sing-box check -c "$SINGBOX_RUNTIME_CONFIG" >"$VALIDATE_LOG" 2>&1; then
         echo "✅ gtacore config validation passed"
         rm -f "$VALIDATE_LOG"
         return 0
@@ -329,13 +352,13 @@ start_singbox() {
     echo "🚀 Starting gtacore..."
 
     if ! validate_singbox_config; then
-        echo "⚠️  Skipping gtacore start until config is fixed..."
-        return 1
+        echo "❌ Fatal: gtacore config is invalid or unreadable; exiting instead of running a degraded container"
+        exit 1
     fi
 
     ensure_gtacore_token
     ensure_singbox_log_forwarder
-    gtacore run --config /tmp/sing-box-config.json --token-file "$GTACORE_TOKEN_FILE" >> "$SINGBOX_LOG_FILE" 2>&1 &
+    gtacore run --config "$SINGBOX_RUNTIME_CONFIG" --token-file "$GTACORE_TOKEN_FILE" >> "$SINGBOX_LOG_FILE" 2>&1 &
     SINGBOX_PID=$!
     echo "✅ gtacore started with PID: $SINGBOX_PID"
 
@@ -369,7 +392,7 @@ if [ "$NEEDS_CERT" = "true" ]; then
     echo "🔍 Waiting for SSL certificates..."
     
     # 提取域名信息 (使用 jq 精确解析)
-    DOMAIN=$(jq -r '[.inbounds[]? | .tls?.server_name // empty] | first // empty' /tmp/sing-box-config.json 2>/dev/null)
+    DOMAIN=$(jq -r '[.inbounds[]? | .tls?.server_name // empty] | first // empty' "$SINGBOX_RUNTIME_CONFIG" 2>/dev/null)
     ROOT_DOMAIN=$(echo "$DOMAIN" | awk -F. '{if(NF>=2) print $(NF-1)"."$NF; else print $0}')
     if [ -z "$ROOT_DOMAIN" ]; then
         ROOT_DOMAIN="example.com"
@@ -408,15 +431,16 @@ if [ "$NEEDS_CERT" = "true" ]; then
         echo "🔧 Updating sing-box config with certificate paths..."
         if ! jq --arg cert "$ACTUAL_CERT" --arg key "$ACTUAL_KEY" \
             '(.inbounds[] | select(.tls?.certificate_path != null) | .tls) |= (.certificate_path = $cert | .key_path = $key)' \
-            /tmp/sing-box-config.json > /tmp/sing-box-config.json.tmp; then
+            "$SINGBOX_RUNTIME_CONFIG" > "${SINGBOX_RUNTIME_CONFIG}.tmp"; then
             echo "❌ Failed to update certificate paths with jq"
-            rm -f /tmp/sing-box-config.json.tmp
+            rm -f "${SINGBOX_RUNTIME_CONFIG}.tmp"
             return 1
         fi
-        if ! mv /tmp/sing-box-config.json.tmp /tmp/sing-box-config.json; then
+        if ! mv "${SINGBOX_RUNTIME_CONFIG}.tmp" "$SINGBOX_RUNTIME_CONFIG"; then
             echo "❌ Failed to replace sing-box config after cert path update"
             return 1
         fi
+        chmod 0644 "$SINGBOX_RUNTIME_CONFIG" 2>/dev/null || true
         echo "✅ Certificate paths updated: $ACTUAL_CERT"
     }
     
