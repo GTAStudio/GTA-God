@@ -1,0 +1,111 @@
+name: Build and Deploy GTAGod
+
+on:
+  workflow_dispatch:
+    inputs:
+      rust_version:
+        description: "Rust toolchain for the gtagate builder stage"
+        required: false
+        default: "1.96"
+      alpine_version:
+        description: "Alpine version for the rust-builder stage"
+        required: false
+        default: "3.23"
+      debian_version:
+        description: "Debian runtime base image"
+        required: false
+        default: "13-slim"
+      force_rebuild:
+        description: "Force rebuild without cache"
+        required: false
+        type: boolean
+        default: false
+  push:
+    branches:
+      - main
+    paths:
+      - Dockerfile
+      - docker-entrypoint.sh
+      - healthcheck.sh
+      - bin/gtacore
+      - bin/gtacore.sha256
+      - gateway/**
+      - singbox-config.*.example
+      - gtagod.conf.example
+      - .github/workflows/docker-build.yml
+
+concurrency:
+  group: docker-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-push:
+    name: Build and push Docker image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6.0.2
+
+      - name: Verify gtacore binary integrity
+        run: sha256sum -c bin/gtacore.sha256
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4.1.0
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v4.2.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v6.1.0
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/gtagod
+          tags: |
+            type=raw,value=latest
+            type=raw,value=v0.0.1
+            type=raw,value={{date 'YYYYMMDD'}}
+            type=sha,prefix={{date 'YYYYMMDD'}}-
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@v7.2.0
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: true
+          pull: true
+          no-cache: ${{ github.event_name == 'workflow_dispatch' && inputs.force_rebuild || false }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: mode=max
+          sbom: true
+          build-args: |
+            RUST_VERSION=${{ inputs.rust_version || '1.96' }}
+            ALPINE_VERSION=${{ inputs.alpine_version || '3.23' }}
+            DEBIAN_VERSION=${{ inputs.debian_version || '13-slim' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3.7.0
+
+      - name: Sign image with cosign keyless
+        env:
+          IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/gtagod
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      - name: Verify published image
+        run: |
+          docker pull "${{ secrets.DOCKERHUB_USERNAME }}/gtagod:v0.0.1"
+          docker run --rm --entrypoint gtagate "${{ secrets.DOCKERHUB_USERNAME }}/gtagod:v0.0.1" --version
+          docker run --rm --entrypoint gtacore "${{ secrets.DOCKERHUB_USERNAME }}/gtagod:v0.0.1" sing-box version
