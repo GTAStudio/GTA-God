@@ -359,6 +359,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "time",
  "tls-parser",
  "tokio",
  "tracing",

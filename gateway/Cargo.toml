@@ -23,6 +23,7 @@ serde_json = "1"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
 
 [lints.rust]
 unsafe_code = "forbid"
