@@ -20,7 +20,9 @@ const DEFAULT_CONFIG_PATH: &str = "/etc/gtagate/config.json";
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .init();
 
     // 安装默认 rustls 加密后端（供下游依赖使用）。

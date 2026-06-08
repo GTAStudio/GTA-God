@@ -24,16 +24,16 @@ pub fn extract_sni(buf: &[u8]) -> SniResult {
         Ok((_, record)) => {
             for msg in &record.msg {
                 if let TlsMessage::Handshake(TlsMessageHandshake::ClientHello(ch)) = msg {
-                    if let Some(ext) = ch.ext {
-                        if let Ok((_, extensions)) = parse_tls_extensions(ext) {
-                            for extension in extensions {
-                                if let TlsExtension::SNI(list) = extension {
-                                    for (_, name) in list {
-                                        if let Ok(host) = std::str::from_utf8(name) {
-                                            if !host.is_empty() {
-                                                return SniResult::Found(host.to_string());
-                                            }
-                                        }
+                    if let Some(ext) = ch.ext
+                        && let Ok((_, extensions)) = parse_tls_extensions(ext)
+                    {
+                        for extension in extensions {
+                            if let TlsExtension::SNI(list) = extension {
+                                for (_, name) in list {
+                                    if let Ok(host) = std::str::from_utf8(name)
+                                        && !host.is_empty()
+                                    {
+                                        return SniResult::Found(host.to_string());
                                     }
                                 }
                             }
@@ -47,5 +47,83 @@ pub fn extract_sni(buf: &[u8]) -> SniResult {
         }
         Err(tls_parser::nom::Err::Incomplete(_)) => SniResult::Incomplete,
         Err(_) => SniResult::Invalid,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SniResult, extract_sni};
+
+    #[test]
+    fn extracts_sni_from_client_hello() {
+        let hello = client_hello_with_sni("api.example.com");
+
+        match extract_sni(&hello) {
+            SniResult::Found(host) => assert_eq!(host, "api.example.com"),
+            _ => panic!("expected SNI to be found"),
+        }
+    }
+
+    #[test]
+    fn reports_no_sni_when_extension_is_absent() {
+        let hello = client_hello_without_extensions();
+
+        assert!(matches!(extract_sni(&hello), SniResult::NoSni));
+    }
+
+    #[test]
+    fn reports_incomplete_for_truncated_client_hello() {
+        let hello = client_hello_with_sni("api.example.com");
+
+        assert!(matches!(extract_sni(&hello[..8]), SniResult::Incomplete));
+    }
+
+    fn client_hello_with_sni(host: &str) -> Vec<u8> {
+        let host = host.as_bytes();
+        let server_name_len = host.len() as u16;
+        let server_name_list_len = 1 + 2 + server_name_len;
+        let sni_extension_len = 2 + server_name_list_len;
+
+        let mut extensions = Vec::new();
+        extensions.extend_from_slice(&0u16.to_be_bytes());
+        extensions.extend_from_slice(&sni_extension_len.to_be_bytes());
+        extensions.extend_from_slice(&server_name_list_len.to_be_bytes());
+        extensions.push(0);
+        extensions.extend_from_slice(&server_name_len.to_be_bytes());
+        extensions.extend_from_slice(host);
+
+        client_hello(Some(&extensions))
+    }
+
+    fn client_hello_without_extensions() -> Vec<u8> {
+        client_hello(None)
+    }
+
+    fn client_hello(extensions: Option<&[u8]>) -> Vec<u8> {
+        let extensions_len = extensions.map_or(0, <[u8]>::len) as u16;
+        let body_len = 2 + 32 + 1 + 2 + 2 + 1 + 1 + 2 + extensions_len as usize;
+        let record_len = 4 + body_len;
+
+        let mut hello = Vec::new();
+        hello.extend_from_slice(&[0x16, 0x03, 0x01]);
+        hello.extend_from_slice(&(record_len as u16).to_be_bytes());
+        hello.push(0x01);
+        hello.extend_from_slice(&[
+            (body_len >> 16) as u8,
+            (body_len >> 8) as u8,
+            body_len as u8,
+        ]);
+        hello.extend_from_slice(&[0x03, 0x03]);
+        hello.extend_from_slice(&[0u8; 32]);
+        hello.push(0);
+        hello.extend_from_slice(&2u16.to_be_bytes());
+        hello.extend_from_slice(&[0x13, 0x01]);
+        hello.push(1);
+        hello.push(0);
+        hello.extend_from_slice(&extensions_len.to_be_bytes());
+        if let Some(extensions) = extensions {
+            hello.extend_from_slice(extensions);
+        }
+        hello
     }
 }

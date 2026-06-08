@@ -94,7 +94,9 @@ impl Cloudflare {
     pub async fn delete_txt(&self, zone_id: &str, record_id: &str) -> anyhow::Result<()> {
         let resp = self
             .http
-            .delete(format!("{API_BASE}/zones/{zone_id}/dns_records/{record_id}"))
+            .delete(format!(
+                "{API_BASE}/zones/{zone_id}/dns_records/{record_id}"
+            ))
             .bearer_auth(&self.token)
             .send()
             .await

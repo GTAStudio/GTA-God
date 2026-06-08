@@ -54,6 +54,28 @@ jobs:
       - name: Verify gtacore binary integrity
         run: sha256sum -c bin/gtacore.sha256
 
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ inputs.rust_version || '1.96' }}
+          components: rustfmt, clippy
+
+      - name: Run Rust quality gates
+        working-directory: gateway
+        run: |
+          cargo fmt -- --check
+          cargo check --locked
+          cargo test --locked
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo update --locked --dry-run --verbose
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Audit Rust dependencies
+        working-directory: gateway
+        run: cargo audit
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4.1.0
 

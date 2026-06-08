@@ -293,7 +293,16 @@ ensure_singbox_log_forwarder() {
 stop_singbox() {
     if [ -n "$SINGBOX_PID" ] && kill -0 "$SINGBOX_PID" 2>/dev/null; then
         kill -TERM "$SINGBOX_PID" 2>/dev/null
-        wait "$SINGBOX_PID" 2>/dev/null
+        _stop_timeout=10
+        while [ $_stop_timeout -gt 0 ] && kill -0 "$SINGBOX_PID" 2>/dev/null; do
+            sleep 1
+            _stop_timeout=$((_stop_timeout - 1))
+        done
+        if kill -0 "$SINGBOX_PID" 2>/dev/null; then
+            echo "⚠️  gtacore did not stop within 10s, force killing PID $SINGBOX_PID..."
+            kill -9 "$SINGBOX_PID" 2>/dev/null
+        fi
+        wait "$SINGBOX_PID" 2>/dev/null || true
     fi
     SINGBOX_PID=""
 }
@@ -383,6 +392,10 @@ start_singbox() {
         tail -30 "$SINGBOX_LOG_FILE" 2>/dev/null || echo "No log file"
         stop_singbox
         echo ""
+        if [ -f /tmp/gtagod-singbox-required ]; then
+            echo "❌ Fatal: gtacore is required for configured inbounds; exiting instead of running a degraded container"
+            exit 1
+        fi
         echo "⚠️  Continuing with gtagate only..."
     fi
 }
@@ -469,7 +482,6 @@ if [ "$NEEDS_CERT" = "true" ]; then
     
     while [ "$CERT_FOUND" = "false" ] && [ $WAIT_COUNT -lt $MAX_WAIT ]; do
         ACTUAL_CERT=$(find_certificate)
-        
         if [ -n "$ACTUAL_CERT" ] && [ -f "$ACTUAL_CERT" ]; then
             ACTUAL_KEY="${ACTUAL_CERT%.crt}.key"
             
@@ -493,7 +505,10 @@ if [ "$NEEDS_CERT" = "true" ]; then
     done
     
     if [ "$CERT_FOUND" = "true" ]; then
-        update_cert_paths
+        if ! update_cert_paths; then
+            echo "❌ Fatal: failed to update certificate paths"
+            exit 1
+        fi
         start_singbox
     else
         echo "⚠️  Timeout waiting for certificate after ${MAX_WAIT}s"
@@ -502,8 +517,8 @@ if [ "$NEEDS_CERT" = "true" ]; then
         RETRY_COUNT=0
         while [ "$CERT_FOUND" = "false" ]; do
             if [ "$CERT_RETRY_MAX" != "0" ] && [ $RETRY_COUNT -ge $CERT_RETRY_MAX ]; then
-                echo "❌ Reached max retry count (${CERT_RETRY_MAX}), sing-box will remain stopped"
-                break
+                echo "❌ Reached max retry count (${CERT_RETRY_MAX}); exiting container to trigger restart"
+                exit 1
             fi
 
             sleep "$CERT_RETRY_INTERVAL"
@@ -516,7 +531,10 @@ if [ "$NEEDS_CERT" = "true" ]; then
                     echo "✅ Found certificate on retry #${RETRY_COUNT}: $ACTUAL_CERT"
                     echo "✅ Found key: $ACTUAL_KEY"
                     CERT_FOUND=true
-                    update_cert_paths
+                    if ! update_cert_paths; then
+                        echo "❌ Fatal: failed to update certificate paths"
+                        exit 1
+                    fi
                     start_singbox
                     break
                 fi
@@ -587,7 +605,10 @@ while true; do
         if [ -n "$NEW_MTIME" ] && [ -n "$CERT_MTIME" ] && [ "$NEW_MTIME" != "$CERT_MTIME" ]; then
             echo "🔄 Certificate updated, reloading sing-box..."
             CERT_MTIME="$NEW_MTIME"
-            update_cert_paths
+            if ! update_cert_paths; then
+                echo "❌ Failed to update certificate paths after cert change; skipping reload"
+                continue
+            fi
             if [ -n "$SINGBOX_PID" ] && kill -0 "$SINGBOX_PID" 2>/dev/null; then
                 if reload_singbox; then
                     echo "✅ sing-box reloaded with new certificate"

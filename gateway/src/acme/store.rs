@@ -55,8 +55,9 @@ impl CertStore {
         let cert_path = self.cert_path(domain);
         let key_path = self.key_path(domain);
 
-        write_atomic(&cert_path, cert_pem.as_bytes(), 0o644)?;
+        // entrypoint 监控证书文件 mtime；先写 key，最后写 cert，避免重启时读到新证书+旧私钥。
         write_atomic(&key_path, key_pem.as_bytes(), 0o600)?;
+        write_atomic(&cert_path, cert_pem.as_bytes(), 0o644)?;
         Ok(())
     }
 

@@ -64,7 +64,7 @@ NAIVE_PORT="8443"
 # AnyTLS 内部监听端口 (L4 模式时使用，非 L4 模式时对外)
 ANYTLS_PORT="8445"
 
-# AnyTLS 用户名和密码 (默认与 NaiveProxy 相同)
+# AnyTLS 用户名和密码 (默认: 用户名沿用 NAIVE_USER，密码沿用 NAIVE_PASSWD)
 # 如需单独设置，取消注释并修改
 # ANYTLS_USER="your_anytls_user"
 # ANYTLS_PASSWORD="your_anytls_password"
@@ -79,7 +79,7 @@ ANYTLS_SNI="api.example.com"
 # AnyReality 内部监听端口 (L4 模式时使用，非 L4 模式时对外)
 ANYREALITY_PORT="8444"
 
-# AnyReality 用户名和密码 (默认与 NaiveProxy 相同)
+# AnyReality 用户名和密码 (默认: 用户名沿用 NAIVE_USER，密码沿用 NAIVE_PASSWD)
 # 如需单独设置，取消注释并修改
 # ANYREALITY_USER="your_anyreality_user"
 # ANYREALITY_PASSWORD="your_anyreality_password"

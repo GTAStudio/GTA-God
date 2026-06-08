@@ -68,7 +68,7 @@ pub struct AcmeConfig {
     /// 距到期多少天内触发续期。
     #[serde(default = "default_renew_days")]
     pub renew_before_days: i64,
-    /// 写入 TXT 记录后、通知 CA 校验前的传播等待（秒）。
+    /// 写入 TXT 记录后、通知 CA 校验前等待 TXT 可查询的最长时间（秒）。
     #[serde(default = "default_propagation")]
     pub dns_propagation_secs: u64,
 }
@@ -127,9 +127,7 @@ impl AcmeConfig {
     /// 将 `ca` 关键字解析为 ACME directory URL。
     pub fn directory_url(&self) -> String {
         match self.ca.to_ascii_lowercase().as_str() {
-            "letsencrypt" | "le" => {
-                "https://acme-v02.api.letsencrypt.org/directory".to_string()
-            }
+            "letsencrypt" | "le" => "https://acme-v02.api.letsencrypt.org/directory".to_string(),
             "letsencrypt-staging" | "staging" => {
                 "https://acme-staging-v02.api.letsencrypt.org/directory".to_string()
             }
@@ -186,5 +184,5 @@ fn default_renew_days() -> i64 {
 }
 
 fn default_propagation() -> u64 {
-    20
+    60
 }
