@@ -1,39 +1,43 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1
 # =========================================
-# GTAGod Dockerfile - sing-box 1.13+ 统一架构
-# 版本: 4.1.1
-# 更新: 2026-05-05
+# GTAGod Dockerfile - sing-box 1.13.x 统一架构
+# 版本: 4.2.1
+# 更新: 2026-06-16
 # =========================================
 #
-# 此版本使用 sing-box 1.13+ 原生 naive inbound
+# 此版本固定使用 sing-box 1.13.x 最新稳定版原生 naive inbound
 # 不再需要 Caddy forwardproxy 插件
 # 所有代理协议由 sing-box 统一处理
 #
 # 架构:
 #   - Caddy: L4 SNI 分流 + ACME 证书申请
-#   - sing-box 1.13+: naive + anytls + anyreality
+#   - sing-box 1.13.x: naive + anytls + anyreality
 #
-# 依赖版本 (2026-05-05 更新):
-#   - Go: 1.26 (sing-box 1.13+ 需要 Go 1.24+)
+# 依赖版本 (2026-06-16 更新):
+#   - Go: 1.26.4 (sing-box 1.13.x 需要 Go 1.24+)
 #   - Alpine: 3.23 (当前 Docker Hub latest 稳定版)
 #   - xcaddy: v0.4.5
-#   - Caddy: v2.11.2
-#   - sing-box: 1.13.11
+#   - Caddy: v2.11.4 (含安全修复 GHSA-vcc4-2c75-vc9v)
+#   - sing-box: 1.13.13 (当前 1.13.x 最新稳定版)
+#   - caddy-dns/cloudflare: v0.2.4
+#   - mholt/caddy-l4: v0.1.1
 #
 # =========================================
 
-ARG GO_VERSION=1.26
+ARG GO_VERSION=1.26.4
 ARG ALPINE_VERSION=3.23
 
 # 构建阶段 - 使用 Alpine 基础镜像
-# Go 1.26 + Alpine 3.23 稳定版，遵循稳定工具链实践
+# Go 1.26.4 + Alpine 3.23 稳定版，遵循稳定工具链实践
 FROM golang:${GO_VERSION}-alpine${ALPINE_VERSION} AS builder
 
-# 构建参数 - sing-box 1.13+ 支持 naive inbound
+# 构建参数 - sing-box 1.13.x 支持 naive inbound
 # Caddy 2.11+ 需要 Go 1.25+ 编译
-ARG CADDY_VERSION=v2.11.2
+ARG CADDY_VERSION=v2.11.4
 ARG XCADDY_VERSION=v0.4.5
-ARG SINGBOX_VERSION=1.13.11
+ARG SINGBOX_VERSION=1.13.13
+ARG CADDY_DNS_CLOUDFLARE_VERSION=v0.2.4
+ARG CADDY_L4_VERSION=v0.1.1
 
 # 固定使用镜像内稳定 Go 工具链，避免自动下载带来的不可重复构建
 ENV GOTOOLCHAIN=local
@@ -48,19 +52,20 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     go install github.com/caddyserver/xcaddy/cmd/xcaddy@${XCADDY_VERSION}
 
 # 构建 Caddy - 仅需要 cloudflare DNS 和 layer4 插件
-# sing-box 1.13+ 处理所有代理协议，不再需要 forwardproxy
+# sing-box 1.13.x 处理所有代理协议，不再需要 forwardproxy
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     xcaddy build ${CADDY_VERSION} \
-        --with github.com/caddy-dns/cloudflare \
-        --with github.com/mholt/caddy-l4 \
+        --with github.com/caddy-dns/cloudflare@${CADDY_DNS_CLOUDFLARE_VERSION} \
+        --with github.com/mholt/caddy-l4@${CADDY_L4_VERSION} \
         --output /usr/bin/caddy
 
-# 下载 sing-box 1.13+ (支持 naive inbound)
+# 下载 sing-box 1.13.x (支持 naive inbound)
 # 使用 TARGETARCH 支持 buildx 多架构构建
 # Alpine 使用 musl libc，必须下载 musl 版本
 ARG TARGETARCH
 RUN set -ex && \
+    case "${SINGBOX_VERSION}" in 1.13.*) ;; *) echo "SINGBOX_VERSION must stay on latest 1.13.x stable, got ${SINGBOX_VERSION}"; exit 1 ;; esac && \
     TARGETARCH=${TARGETARCH:-amd64} && \
     echo "==> TARGETARCH=${TARGETARCH}" && \
     if [ "$TARGETARCH" = "amd64" ]; then ARCH="amd64"; \
@@ -94,8 +99,8 @@ FROM alpine:${ALPINE_VERSION}
 
 # 元数据
 LABEL maintainer="gtagod" \
-      description="GTAGod - sing-box 1.13+ (naive + anytls + anyreality) with Caddy L4" \
-      version="4.1.1"
+    description="GTAGod - sing-box 1.13.x (naive + anytls + anyreality) with Caddy L4" \
+    version="4.2.1"
 
 # 一次性安装所有依赖并创建目录，减少镜像层
 RUN apk upgrade --no-cache && \
@@ -103,7 +108,8 @@ RUN apk upgrade --no-cache && \
         ca-certificates \
         libcap \
         tzdata \
-        jq && \
+        jq \
+        procps-ng && \
     # 设置时区
     cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \
     echo "Asia/Shanghai" > /etc/timezone && \
@@ -117,12 +123,11 @@ RUN apk upgrade --no-cache && \
         /var/log/sing-box
 
 # 复制编译好的 caddy 和 sing-box
-COPY --from=builder /usr/bin/caddy /usr/bin/caddy
-COPY --from=builder /usr/bin/sing-box /usr/bin/sing-box
+COPY --from=builder --chmod=755 /usr/bin/caddy /usr/bin/caddy
+COPY --from=builder --chmod=755 /usr/bin/sing-box /usr/bin/sing-box
 
 # 设置权限并验证版本
-RUN chmod +x /usr/bin/caddy /usr/bin/sing-box && \
-    caddy version && \
+RUN caddy version && \
     caddy list-modules | grep -E "(layer4|cloudflare)" && \
     sing-box version
 
@@ -132,7 +137,7 @@ ENV XDG_CONFIG_HOME=/config \
     TZ=Asia/Shanghai
 
 # 暴露端口
-EXPOSE 80 443 2019 8443
+EXPOSE 80 443
 
 # 数据卷
 VOLUME ["/config", "/data", "/var/log/caddy", "/etc/sing-box", "/var/log/sing-box"]
@@ -143,9 +148,8 @@ WORKDIR /config/caddy
 STOPSIGNAL SIGTERM
 
 # 复制启动脚本
-COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-COPY healthcheck.sh /usr/local/bin/healthcheck.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/healthcheck.sh
+COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY --chmod=755 healthcheck.sh /usr/local/bin/healthcheck.sh
 
 # 健康检查 - Caddy + sing-box + 证书就绪状态
 HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=3 \

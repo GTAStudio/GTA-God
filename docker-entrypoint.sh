@@ -4,8 +4,8 @@
 
 # =========================================
 # GTAGod Docker Entrypoint
-# 版本: 4.1.1
-# 更新: 2026-01-01
+# 版本: 4.2.1
+# 更新: 2026-06-16
 # =========================================
 # 
 # sing-box 1.13+ 统一架构:
@@ -20,7 +20,7 @@
 #
 # =========================================
 
-VERSION="4.1.1"
+VERSION="4.2.1"
 SINGBOX_LOG_FILE="/var/log/sing-box/sing-box.log"
 
 echo "========================================="
@@ -141,6 +141,12 @@ fi
 if jq -e '.inbounds[]? | select(.tls?.certificate_path != null)' /tmp/sing-box-config.json >/dev/null 2>&1; then
     NEEDS_CERT=true
     echo "📋 Certificate required for TLS inbounds"
+fi
+
+if [ "$HAS_NAIVE" = "true" ] || [ "$HAS_ANYTLS" = "true" ] || [ "$HAS_ANYREALITY" = "true" ]; then
+    touch /tmp/gtagod-singbox-required
+else
+    rm -f /tmp/gtagod-singbox-required
 fi
 
 # =========================================
@@ -300,6 +306,7 @@ start_singbox() {
     sleep 3
     if kill -0 "$SINGBOX_PID" 2>/dev/null; then
         SINGBOX_RESTART_ATTEMPTS=0
+        touch /tmp/gtagod-singbox-started
         echo "✅ sing-box is running successfully!"
         
         # 显示启用的功能

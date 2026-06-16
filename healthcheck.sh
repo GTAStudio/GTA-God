@@ -9,8 +9,11 @@ fi
 # Caddy must always be running
 pgrep -x caddy >/dev/null 2>&1 || { echo "healthcheck: caddy not running" >&2; exit 1; }
 
-# sing-box may not be started yet if waiting for certificates
-# Only fail if sing-box was previously running (PID file or process exists)
+if [ -f /tmp/gtagod-singbox-required ]; then
+    pgrep -x sing-box >/dev/null 2>&1 || { echo "healthcheck: sing-box required but not running" >&2; exit 1; }
+fi
+
+# Verify certificate files once sing-box is running.
 if pgrep -x sing-box >/dev/null 2>&1; then
     # sing-box is running, verify certificate if configured
     if [ -f "$CONFIG_PATH" ]; then
