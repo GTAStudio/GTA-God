@@ -1,26 +1,19 @@
-name: Build and Deploy GTAGod
+name: Build and Push GTAGod Docker Image
 
 on:
-  # push:
-  #   branches: [main, master]
-  #   paths:
-  #     - 'Dockerfile'
-  #     - 'docker-entrypoint.sh'
-  #     - '.github/workflows/docker-build.yml'
-  workflow_dispatch:  # Manual trigger only - 只能手动触发
+  push:
+    branches: [main]
+    paths:
+      - 'Dockerfile'
+      - 'docker-entrypoint.sh'
+      - 'healthcheck.sh'
+      - 'bin/**'
+      - 'gateway/**'
+      - 'singbox-config.*.example'
+      - 'gtagod.conf.example'
+      - '.github/workflows/docker-build.yml'
+  workflow_dispatch:
     inputs:
-      caddy_version:
-        description: 'Caddy version (default: v2.11.4)'
-        required: false
-        default: 'v2.11.4'
-      singbox_version:
-        description: 'sing-box 1.13.x stable version (default/latest: 1.13.13)'
-        required: false
-        default: '1.13.13'
-      alpine_version:
-        description: 'Alpine base image version (default: 3.23)'
-        required: false
-        default: '3.23'
       force_rebuild:
         description: 'Force rebuild (no cache)'
         required: false
@@ -32,15 +25,12 @@ concurrency:
   cancel-in-progress: true
 
 # =========================================
-# GTAGod v4.2.1 - sing-box 1.13+ 统一架构
+# GTAGod v0.1.8 - Pure Rust 统一架构
 # =========================================
-# 
-# sing-box 1.13+ 原生支持 naive inbound
-# 不再需要 Caddy forwardproxy 插件
 #
 # 架构:
-#   - Caddy: L4 SNI 分流 + ACME 证书申请
-#   - sing-box 1.13+: naive + anytls + anyreality
+#   - gtagate (Rust musl): L4 SNI 分流 + ACME + splice(2) 零拷贝
+#   - gtacore (Rust glibc): naive + anytls + anyreality
 #
 # =========================================
 
@@ -52,72 +42,53 @@ jobs:
       packages: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6.0.2
-      
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4.1.0
-      
+        uses: actions/checkout@v4
+
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4.1.0
-      
+        uses: docker/setup-buildx-action@v3
+
       - name: Login to Docker Hub
-        uses: docker/login-action@v4.2.0
+        uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      
+
       - name: Extract metadata
         id: meta
-        uses: docker/metadata-action@v6.1.0
+        uses: docker/metadata-action@v5
         with:
           images: ${{ secrets.DOCKERHUB_USERNAME }}/gtagod
           tags: |
             type=raw,value=latest
-            type=raw,value=v4.2.1
-            type=raw,value={{date 'YYYYMMDD'}}
-            type=sha,prefix={{date 'YYYYMMDD'}}-
-      
-      - name: Enforce sing-box 1.13.x
-        run: |
-          SINGBOX_VERSION="${{ github.event.inputs.singbox_version || '1.13.13' }}"
-          case "$SINGBOX_VERSION" in
-            1.13.*) ;;
-            *) echo "SINGBOX_VERSION must stay on latest 1.13.x stable, got $SINGBOX_VERSION" >&2; exit 1 ;;
-          esac
-      
+            type=raw,value=v0.1.8
+            type=raw,value=gtacore-0.1.8-{{date 'YYYYMMDD'}}
+            type=sha,prefix=
+
       - name: Build and push
-        uses: docker/build-push-action@v7.2.0
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
           pull: true
           no-cache: ${{ github.event.inputs.force_rebuild || false }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            CADDY_VERSION=${{ github.event.inputs.caddy_version || 'v2.11.4' }}
-            SINGBOX_VERSION=${{ github.event.inputs.singbox_version || '1.13.13' }}
-            ALPINE_VERSION=${{ github.event.inputs.alpine_version || '3.23' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      
+
       - name: Verify image
         run: |
-          echo "🔍 Verifying GTAGod v4.2.1 image..."
-          docker pull ${{ secrets.DOCKERHUB_USERNAME }}/gtagod:v4.2.1
-          
-          echo "📦 Checking Caddy..."
-          docker run --rm --entrypoint caddy ${{ secrets.DOCKERHUB_USERNAME }}/gtagod:v4.2.1 version
-          
-          echo "📦 Checking Caddy modules (layer4 + cloudflare)..."
-          docker run --rm --entrypoint caddy ${{ secrets.DOCKERHUB_USERNAME }}/gtagod:v4.2.1 list-modules | grep -E "(layer4|cloudflare)"
-          
-          echo "📦 Checking sing-box 1.13+ (native naive inbound)..."
-          docker run --rm --entrypoint sing-box ${{ secrets.DOCKERHUB_USERNAME }}/gtagod:v4.2.1 version
-          
-          echo "✅ GTAGod v4.2.1 image verification passed!"
-          echo "   - Caddy with layer4 + cloudflare modules"
-          echo "   - sing-box 1.13+ with native naive inbound"
-          echo "   - No external forwardproxy needed!"
+          echo "🔍 Verifying GTAGod v0.1.8 image..."
+          docker pull ${{ secrets.DOCKERHUB_USERNAME }}/gtagod:latest
+
+          echo "📦 Checking gtagate..."
+          docker run --rm --entrypoint gtagate ${{ secrets.DOCKERHUB_USERNAME }}/gtagod:latest --version
+
+          echo "📦 Checking gtacore..."
+          docker run --rm --entrypoint gtacore ${{ secrets.DOCKERHUB_USERNAME }}/gtagod:latest sing-box version
+
+          echo "✅ GTAGod v0.1.8 verification passed!"
+          echo "   - gtagate: L4 SNI + ACME + splice(2) zero-copy"
+          echo "   - gtacore: naive + anytls + anyreality"
