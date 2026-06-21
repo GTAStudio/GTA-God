@@ -1,0 +1,45 @@
+[package]
+name = "gtagate"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+description = "GTAGod L4 SNI dispatcher + ACME (Cloudflare DNS-01) gateway — pure-Rust Caddy replacement for the features used by GTA-God"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "gtagate"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "signal", "sync"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tls-parser = "0.12"
+instant-acme = "0.8"
+rustls = "0.23"
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
+x509-parser = "0.18"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
+socket2 = { version = "0.5", features = ["all"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"

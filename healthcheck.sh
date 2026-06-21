@@ -9,6 +9,18 @@ fi
 # Caddy must always be running
 pgrep -x caddy >/dev/null 2>&1 || { echo "healthcheck: caddy not running" >&2; exit 1; }
 
+# Verify gtagate is actually accepting connections (not just alive but hung).
+# nc (netcat-openbsd) is installed in the image; procfs fallback for minimal images.
+if command -v nc >/dev/null 2>&1; then
+    nc -z -w 3 127.0.0.1 443 >/dev/null 2>&1 \
+        || { echo "healthcheck: port 443 not accepting connections" >&2; exit 1; }
+elif [ -r /proc/net/tcp ] || [ -r /proc/net/tcp6 ]; then
+    # Check for LISTEN state (0A) on port 443 (0x01BB) via procfs
+    awk 'BEGIN{rc=1} $2 ~ /:01BB$/ && $4=="0A"{rc=0} END{exit rc}' \
+        /proc/net/tcp /proc/net/tcp6 2>/dev/null \
+        || { echo "healthcheck: no LISTEN socket on :443" >&2; exit 1; }
+fi
+
 if [ -f /tmp/gtagod-singbox-required ]; then
     pgrep -x sing-box >/dev/null 2>&1 || { echo "healthcheck: sing-box required but not running" >&2; exit 1; }
 fi
