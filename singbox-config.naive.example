@@ -24,7 +24,7 @@
         "server_port": 443
       }
     ],
-    "strategy": "ipv4_only"
+    "strategy": "{{DNS_STRATEGY}}"
   },
   "route": {
     "default_domain_resolver": "doh-primary"
