@@ -32,6 +32,9 @@ echo "GTACore (Rust) unified architecture"
 echo "Starting gtagate + gtacore services..."
 echo "========================================="
 
+# 尽力提升文件描述符软上限（高并发代理；容器通常已由 docker run --ulimit 设好硬上限，此处兜底）。
+ulimit -n 65536 2>/dev/null || true
+
 # =========================================
 # 检查配置文件
 # =========================================
@@ -73,8 +76,8 @@ if ! cat "$SINGBOX_MOUNTED_CONFIG" > "$SINGBOX_RUNTIME_CONFIG"; then
     exit 1
 fi
 
-if ! chmod 0644 "$SINGBOX_RUNTIME_CONFIG"; then
-    echo "❌ ERROR: Failed to set readable permissions on $SINGBOX_RUNTIME_CONFIG"
+if ! chmod 0600 "$SINGBOX_RUNTIME_CONFIG"; then
+    echo "❌ ERROR: Failed to set permissions on $SINGBOX_RUNTIME_CONFIG"
     exit 1
 fi
 
@@ -127,7 +130,7 @@ migrate_legacy_dns_servers() {
         return 1
     fi
 
-    chmod 0644 "$SINGBOX_RUNTIME_CONFIG" 2>/dev/null || true
+    chmod 0600 "$SINGBOX_RUNTIME_CONFIG" 2>/dev/null || true
 
     echo "✅ Legacy sing-box DNS servers migrated to typed HTTPS format"
     return 0
@@ -155,7 +158,7 @@ enforce_ipv4_only_without_ipv6() {
     echo "⚠️  未检测到全局 IPv6 地址，将 DNS strategy 由 ${_dns_strategy} 强制为 ipv4_only（避免直连不可达的 IPv6）"
     if jq '.dns.strategy = "ipv4_only"' "$SINGBOX_RUNTIME_CONFIG" > "${SINGBOX_RUNTIME_CONFIG}.ipv4" \
         && mv "${SINGBOX_RUNTIME_CONFIG}.ipv4" "$SINGBOX_RUNTIME_CONFIG"; then
-        chmod 0644 "$SINGBOX_RUNTIME_CONFIG" 2>/dev/null || true
+        chmod 0600 "$SINGBOX_RUNTIME_CONFIG" 2>/dev/null || true
         echo "✅ DNS strategy 已设为 ipv4_only"
     else
         echo "⚠️  设置 ipv4_only 失败，继续使用 ${_dns_strategy}"
@@ -446,7 +449,7 @@ if [ "$NEEDS_CERT" = "true" ]; then
             echo "❌ Failed to replace sing-box config after cert path update"
             return 1
         fi
-        chmod 0644 "$SINGBOX_RUNTIME_CONFIG" 2>/dev/null || true
+        chmod 0600 "$SINGBOX_RUNTIME_CONFIG" 2>/dev/null || true
         echo "✅ Certificate paths updated: $ACTUAL_CERT"
     }
     

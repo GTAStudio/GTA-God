@@ -16,6 +16,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 use tracing::{debug, info, warn};
 
 use crate::config::Config;
@@ -53,8 +54,8 @@ pub async fn run(cfg: Arc<Config>, cancel: CancellationToken) -> anyhow::Result<
         None
     };
 
-    // 追踪活跃连接，以便优雅 drain。
-    let active_connections = Arc::new(tokio::sync::Semaphore::new(0));
+    // TaskTracker 追踪活跃连接，配合 CancellationToken 实现优雅 drain（2026 tokio 规范原语）。
+    let tracker = TaskTracker::new();
 
     loop {
         // 在 accept 之前先取并发许可，达到上限时自然背压（不会无界堆积）。
@@ -80,38 +81,27 @@ pub async fn run(cfg: Arc<Config>, cancel: CancellationToken) -> anyhow::Result<
                     }
                 };
                 let cfg = Arc::clone(&cfg);
-                let conn_tracker = Arc::clone(&active_connections);
-                // 增加活跃连接计数（通过 add_permits 的逆用：用 forget 的 permit 追踪）
-                conn_tracker.add_permits(1);
-                tokio::spawn(async move {
+                tracker.spawn(async move {
                     let _permit = permit;
                     if let Err(e) = handle_connection(client, cfg).await {
                         debug!(peer = %peer, error = %e, "连接处理结束");
-                    }
-                    // 连接结束：通知 drain 逻辑
-                    if let Ok(p) = conn_tracker.acquire().await {
-                        p.forget();
                     }
                 });
             }
         }
     }
 
-    // 优雅 drain：等待所有活跃连接完成（带超时）。
-    let available = active_connections.available_permits();
-    if available > 0 {
-        info!(active = available, timeout_secs = SHUTDOWN_DRAIN_TIMEOUT.as_secs(), "等待活跃连接完成...");
-        // 尝试获取与活跃连接同数的 permits（每个连接完成时 acquire 并 forget，会释放 permit 回来）。
-        // 这比 polling 更高效——每个连接结束时自动售票，最终全部释放时我们就能获取到。
-        match timeout(
-            SHUTDOWN_DRAIN_TIMEOUT,
-            active_connections.acquire_many(available as u32),
-        )
-        .await
-        {
-            Ok(Ok(_)) => info!("所有活跃连接已完成"),
-            Ok(Err(_)) => info!("所有活跃连接已完成"),
-            Err(_) => warn!(remaining = active_connections.available_permits(), "drain 超时，强制退出"),
+    // 停止接受新连接，等待活跃连接 drain（带超时）。
+    tracker.close();
+    if !tracker.is_empty() {
+        info!(
+            active = tracker.len(),
+            timeout_secs = SHUTDOWN_DRAIN_TIMEOUT.as_secs(),
+            "停止接受新连接，等待活跃连接完成..."
+        );
+        match timeout(SHUTDOWN_DRAIN_TIMEOUT, tracker.wait()).await {
+            Ok(()) => info!("所有活跃连接已完成"),
+            Err(_) => warn!(remaining = tracker.len(), "drain 超时，强制退出"),
         }
     }
     Ok(())
@@ -196,89 +186,121 @@ async fn handle_connection(mut client: TcpStream, cfg: Arc<Config>) -> anyhow::R
 // Linux splice(2) 零拷贝实现
 // =========================================================================
 
-/// Linux splice(2) 双向零拷贝透传。
-/// 每个方向用一对 pipe 作为内核缓冲区，splice 在 fd 之间移动数据完全不经用户态。
+/// RAII pipe：用 `OwnedFd` 托管两端，离开作用域自动 close —— 根除"每连接泄漏 4 个 fd"的旧缺陷。
 #[cfg(target_os = "linux")]
-async fn copy_bidirectional_splice(
-    client: &TcpStream,
-    upstream: &TcpStream,
-) -> io::Result<()> {
-    use std::os::unix::io::AsRawFd;
+struct Pipe {
+    read: std::os::fd::OwnedFd,
+    write: std::os::fd::OwnedFd,
+}
+
+#[cfg(target_os = "linux")]
+impl Pipe {
+    /// 创建非阻塞 + CLOEXEC pipe，并尝试把内核缓冲扩大到 64KB。
+    fn new() -> io::Result<Self> {
+        use std::os::fd::FromRawFd;
+
+        let mut fds = [0i32; 2];
+        // SAFETY: fds 为合法的二元数组指针，pipe2 只向其写入两个描述符。
+        let ret = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_NONBLOCK | libc::O_CLOEXEC) };
+        if ret < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: pipe2 成功返回，fds[0]/fds[1] 是本进程独占的有效描述符，交由 OwnedFd 托管生命周期。
+        let read = unsafe { std::os::fd::OwnedFd::from_raw_fd(fds[0]) };
+        let write = unsafe { std::os::fd::OwnedFd::from_raw_fd(fds[1]) };
+        // 扩大 pipe buffer 到 64KB（失败不致命，多数内核默认 16 页 = 64KB）。
+        // SAFETY: fds[1] 为有效写端描述符，F_SETPIPE_SZ 不涉及指针。
+        unsafe { libc::fcntl(fds[1], libc::F_SETPIPE_SZ, 65536) };
+        Ok(Self { read, write })
+    }
+}
+
+/// Linux splice(2) 双向零拷贝透传。
+///
+/// 正确性要点（修复历史三个缺陷）：
+///   1. pipe 由 `OwnedFd` 托管，连接结束自动 close —— 根除每连接 4 个 fd 的泄漏（→ EMFILE）。
+///   2. 用 `TcpStream::async_io`（而非裸 `readable()` + 裸 splice）驱动系统调用 ——
+///      WouldBlock 时 tokio 会清除 readiness 并真正挂起任务，根除 100% CPU 空转。
+///   3. 用 `join!`（而非 `select!`）跑完两个方向，一方 EOF 时仅关闭对端写半边 ——
+///      正确处理 TCP 半关闭，不截断在途数据。
+#[cfg(target_os = "linux")]
+async fn copy_bidirectional_splice(client: &TcpStream, upstream: &TcpStream) -> io::Result<()> {
+    use std::net::Shutdown;
+    use std::os::fd::AsRawFd;
 
     let client_fd = client.as_raw_fd();
     let upstream_fd = upstream.as_raw_fd();
 
-    // 为每个方向创建 pipe（非阻塞 + CLOEXEC）。
-    let (pr1, pw1) = create_pipe()?; // client → upstream
-    let (pr2, pw2) = create_pipe()?; // upstream → client
+    let pipe_c2u = Pipe::new()?; // client → upstream
+    let pipe_u2c = Pipe::new()?; // upstream → client
 
-    let c2u = splice_one_direction(client, client_fd, pw1, pr1, upstream, upstream_fd);
-    let u2c = splice_one_direction(upstream, upstream_fd, pw2, pr2, client, client_fd);
+    let c2u = async {
+        let r = splice_one_direction(client, client_fd, &pipe_c2u, upstream, upstream_fd).await;
+        // client 该方向 EOF：关闭 upstream 写半边，让其得以正常收尾（半关闭）。
+        let _ = SockRef::from(upstream).shutdown(Shutdown::Write);
+        r
+    };
+    let u2c = async {
+        let r = splice_one_direction(upstream, upstream_fd, &pipe_u2c, client, client_fd).await;
+        let _ = SockRef::from(client).shutdown(Shutdown::Write);
+        r
+    };
 
-    // 任一方向 EOF 或错误即结束整条连接。
-    tokio::select! {
-        r = c2u => r,
-        r = u2c => r,
-    }
+    // 两个方向各自跑到 EOF，正确处理半关闭；任一方向出错则返回该错误。
+    let (r1, r2) = tokio::join!(c2u, u2c);
+    r1.and(r2)
 }
 
-/// 创建非阻塞 pipe 并设置 64KB pipe buffer（匹配 copy_buffer_size）。
-#[cfg(target_os = "linux")]
-fn create_pipe() -> io::Result<(i32, i32)> {
-    let mut fds = [0i32; 2];
-    // pipe2 with O_NONBLOCK | O_CLOEXEC
-    let ret = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_NONBLOCK | libc::O_CLOEXEC) };
-    if ret < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // 扩大 pipe buffer 到 64KB（失败不致命，默认 16 页 = 64KB 在多数内核已足够）。
-    unsafe { libc::fcntl(fds[1], libc::F_SETPIPE_SZ, 65536) };
-    Ok((fds[0], fds[1]))
-}
-
-/// 单方向 splice 循环：source_fd → pipe → dest_fd。
+/// 单方向 splice 循环：src socket → pipe → dst socket。
+/// 用 `async_io` 让 tokio 正确管理 readiness（WouldBlock 自动挂起，绝不空转）。
 #[cfg(target_os = "linux")]
 async fn splice_one_direction(
-    src_stream: &TcpStream,
-    src_fd: i32,
-    pipe_w: i32,
-    pipe_r: i32,
-    dst_stream: &TcpStream,
-    dst_fd: i32,
+    src: &TcpStream,
+    src_fd: std::os::fd::RawFd,
+    pipe: &Pipe,
+    dst: &TcpStream,
+    dst_fd: std::os::fd::RawFd,
 ) -> io::Result<()> {
-    const SPLICE_FLAGS: libc::c_uint =
-        (libc::SPLICE_F_MOVE | libc::SPLICE_F_NONBLOCK) as libc::c_uint;
+    use std::os::fd::AsRawFd;
+    use tokio::io::Interest;
+
     const CHUNK: usize = 65536;
+    let pipe_w = pipe.write.as_raw_fd();
+    let pipe_r = pipe.read.as_raw_fd();
 
     loop {
-        // 等待 source 可读。
-        src_stream.readable().await?;
+        // src socket → pipe：等待源可读；splice 返回 EAGAIN 时 async_io 自动清 readiness 并挂起。
+        let n = src
+            .async_io(Interest::READABLE, || splice_raw(src_fd, pipe_w, CHUNK))
+            .await?;
+        if n == 0 {
+            return Ok(()); // 源 EOF
+        }
 
-        // splice: source socket → pipe (非阻塞)。
-        let n = match splice_call(src_fd, pipe_w, CHUNK, SPLICE_FLAGS) {
-            Ok(0) => return Ok(()), // EOF
-            Ok(n) => n,
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => continue,
-            Err(e) => return Err(e),
-        };
-
-        // splice: pipe → dest socket。pipe 中已有 n 字节，全部写完。
+        // pipe → dst socket：把 pipe 中的 n 字节全部写出。
         let mut remaining = n;
         while remaining > 0 {
-            dst_stream.writable().await?;
-            match splice_call(pipe_r, dst_fd, remaining, SPLICE_FLAGS) {
-                Ok(0) => return Err(io::Error::new(io::ErrorKind::BrokenPipe, "splice dest closed")),
-                Ok(written) => remaining -= written,
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => continue,
-                Err(e) => return Err(e),
+            let written = dst
+                .async_io(Interest::WRITABLE, || splice_raw(pipe_r, dst_fd, remaining))
+                .await?;
+            if written == 0 {
+                return Err(io::Error::new(io::ErrorKind::WriteZero, "splice 写入 0 字节"));
             }
+            remaining -= written;
         }
     }
 }
 
-/// 安全包装 splice(2) 系统调用。
+/// 裸 splice(2) 包装：EAGAIN → `ErrorKind::WouldBlock`（供 `async_io` 识别并挂起，而非空转）。
 #[cfg(target_os = "linux")]
-fn splice_call(fd_in: i32, fd_out: i32, len: usize, flags: libc::c_uint) -> io::Result<usize> {
+fn splice_raw(
+    fd_in: std::os::fd::RawFd,
+    fd_out: std::os::fd::RawFd,
+    len: usize,
+) -> io::Result<usize> {
+    const FLAGS: libc::c_uint = (libc::SPLICE_F_MOVE | libc::SPLICE_F_NONBLOCK) as libc::c_uint;
+    // SAFETY: fd_in/fd_out 由调用方保证有效（来自存活的 TcpStream / Pipe）；
+    // 两个 offset 传 null 表示使用各自隐含偏移（socket/pipe 无 seek 偏移）。
     let ret = unsafe {
         libc::splice(
             fd_in,
@@ -286,7 +308,7 @@ fn splice_call(fd_in: i32, fd_out: i32, len: usize, flags: libc::c_uint) -> io::
             fd_out,
             std::ptr::null_mut(),
             len,
-            flags,
+            FLAGS,
         )
     };
     if ret < 0 {

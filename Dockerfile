@@ -79,8 +79,10 @@ RUN apt-get update && \
         /etc/sing-box \
         /var/log/sing-box
 
-# 创建非 root 用户（配合 setcap 和 --cap-add=NET_BIND_SERVICE 实现最小权限）
-RUN useradd -r -s /usr/sbin/nologin -d /nonexistent gtagate && \
+# 创建非 root 用户（固定 UID/GID 65532，便于宿主机 bind-mount 目录精确 chown，
+# 避免用 chmod 777 放开世界可写）。配合 setcap 和 --cap-add=NET_BIND_SERVICE 实现最小权限。
+RUN groupadd -g 65532 gtagate && \
+    useradd -u 65532 -g 65532 -M -s /usr/sbin/nologin -d /nonexistent gtagate && \
     chown gtagate:gtagate /config /data /var/log/caddy /var/log/sing-box
 
 # 复制 gtagate (musl 静态, 来自构建阶段) 与 gtacore (本地预构建 glibc 二进制)

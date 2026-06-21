@@ -60,14 +60,14 @@ async fn main() -> anyhow::Result<()> {
 
     // 优雅退出：使用 CancellationToken 通知分流器停止 accept 并 drain 活跃连接。
     let cancel = CancellationToken::new();
-    let dispatcher = {
+    let mut dispatcher = {
         let cfg = Arc::clone(&cfg);
         let cancel = cancel.clone();
         tokio::spawn(async move { dispatch::run(cfg, cancel).await })
     };
 
     tokio::select! {
-        result = dispatcher => {
+        result = &mut dispatcher => {
             match result {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => {
@@ -83,6 +83,12 @@ async fn main() -> anyhow::Result<()> {
         _ = shutdown_signal() => {
             info!("收到退出信号，gtagate 正在优雅关闭");
             cancel.cancel();
+            // 等待分流器把活跃连接 drain 完（其内部 30s drain 超时会先触发）。
+            match dispatcher.await {
+                Ok(Ok(())) => info!("分流器已优雅退出"),
+                Ok(Err(e)) => error!(error = %e, "分流器退出时报错"),
+                Err(e) => error!(error = %e, "分流器任务 join 失败"),
+            }
         }
     }
     Ok(())

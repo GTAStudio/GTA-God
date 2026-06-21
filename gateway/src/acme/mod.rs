@@ -346,14 +346,18 @@ fn datetime_candidates(text: &str) -> Vec<String> {
 
 fn lets_encrypt_utc_candidates(text: &str) -> Vec<String> {
     const LEN: usize = "2026-06-08 20:00:00 UTC".len();
-    let bytes = text.as_bytes();
-    if bytes.len() < LEN {
+    if text.len() < LEN {
         return Vec::new();
     }
 
+    // 按字符边界滑动定长窗口，并用 `str::get`（越界或非字符边界返回 None，而非 panic）。
+    // text 来自 `format!("{e:#}")` 的 anyhow 错误信息——本项目错误信息含中文，
+    // 旧实现 `&text[start..start + LEN]` 会在多字节字符中间 panic，叠加 panic=abort 拖垮整进程。
     let mut candidates = Vec::new();
-    for start in 0..=bytes.len() - LEN {
-        let candidate = &text[start..start + LEN];
+    for (start, _) in text.char_indices() {
+        let Some(candidate) = text.get(start..start + LEN) else {
+            continue;
+        };
         if looks_like_lets_encrypt_utc(candidate) {
             candidates.push(candidate.to_string());
         }
@@ -732,6 +736,21 @@ mod tests {
             parse_retry_after_delay("Retry-After: Mon, 08 Jun 2026 20:00:00 GMT", now),
             Some(Duration::from_secs(10 * 3600))
         );
+    }
+
+    #[test]
+    fn retry_after_parsing_is_panic_free_on_multibyte_text() {
+        let now = datetime!(2026-06-08 10:00 UTC);
+        // anyhow 错误信息常含中文：含合法 LE 时间戳时仍能解析，且绝不 panic。
+        assert_eq!(
+            parse_retry_after_delay(
+                "证书签发失败：rateLimited，请 retry after 2026-06-08 20:00:00 UTC 后重试",
+                now,
+            ),
+            Some(Duration::from_secs(10 * 3600))
+        );
+        // 纯中文、无时间戳：返回 None 且不 panic（旧实现会在此 panic）。
+        assert_eq!(parse_retry_after_delay("证书签发失败：未知错误", now), None);
     }
 
     #[test]
