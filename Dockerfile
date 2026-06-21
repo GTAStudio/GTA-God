@@ -107,17 +107,6 @@ RUN setcap 'cap_net_bind_service=+ep' /usr/bin/gtagate
 RUN gtagate --version && \
     gtacore sing-box version
 
-# 内置 sing-box 配置模板：供 run.sh 在服务器端通过
-# `docker run --rm --entrypoint cat <image> /opt/gtagod/templates/<name>` 提取，
-# 从而免去在服务器单独上传这些模板文件
-COPY --chmod=644 \
-    gtacore-config.naive.example \
-    gtacore-config.anytls-combo.example \
-    gtacore-config.anyreality-combo.example \
-    gtacore-config.l4.example \
-    gtagod.conf.example \
-    /opt/gtagod/templates/
-
 # 环境变量
 ENV XDG_CONFIG_HOME=/config \
     XDG_DATA_HOME=/data \
