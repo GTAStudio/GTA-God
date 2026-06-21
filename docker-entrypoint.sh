@@ -255,6 +255,11 @@ GATE_PID=$!
 sleep 2
 if ! kill -0 "$GATE_PID" 2>/dev/null; then
     echo "❌ gtagate failed to start (exited within 2s)"
+    echo "   ↑ 若上方日志为「绑定监听地址 0.0.0.0:443 失败: Permission denied」："
+    echo "     非 root 进程在你的 runc（老版本 no_new_privs 会忽略文件能力）或 userns-remap/rootless 下"
+    echo "     拿不到 NET_BIND_SERVICE。请在【宿主机】以 root 执行（容器内非 root 无权设置此项）："
+    echo "       sysctl -w net.ipv4.ip_unprivileged_port_start=0"
+    echo "     然后重启容器（部署脚本 run.sh 已自动设置并持久化此项）。"
     exit 1
 fi
 echo "✅ gtagate started with PID: $GATE_PID"
