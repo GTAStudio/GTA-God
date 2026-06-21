@@ -4,71 +4,92 @@
 
 # =========================================
 # GTAGod Docker Entrypoint
-# 版本: 4.2.1
-# 更新: 2026-06-16
+# 版本: 0.0.1
+# 更新: 2026-06-04
 # =========================================
 # 
-# sing-box 1.13+ 统一架构:
-#   - Caddy: L4 SNI 分流 + ACME 证书申请
-#   - sing-box: naive + anytls + anyreality
+# GTACore (Rust) 统一架构:
+#   - gtagate (Rust): L4 SNI 分流 + ACME 证书申请
+#   - gtacore (Rust): naive + anytls + anyreality (替代 sing-box)
 #
 # 支持的部署模式:
-#   - NaiveProxy Only (sing-box naive inbound)
-#   - NaiveProxy + AnyTLS (sing-box naive + anytls)
-#   - NaiveProxy + AnyReality (sing-box naive + anyreality)
-#   - L4 多协议 (Layer4 SNI 分流, 全部 sing-box 处理)
+#   - NaiveProxy Only (gtacore naive inbound)
+#   - NaiveProxy + AnyTLS (gtacore naive + anytls)
+#   - NaiveProxy + AnyReality (gtacore naive + anyreality)
+#   - L4 多协议 (Layer4 SNI 分流, 全部 gtacore 处理)
 #
 # =========================================
 
-VERSION="4.2.1"
+VERSION="0.0.1"
+SINGBOX_MOUNTED_CONFIG="/etc/sing-box/config.json"
+SINGBOX_RUNTIME_CONFIG="/tmp/sing-box-config.json"
 SINGBOX_LOG_FILE="/var/log/sing-box/sing-box.log"
+GTAGATE_CONFIG="/etc/gtagate/config.json"
 
 echo "========================================="
 echo "GTAGod Container v${VERSION}"
-echo "sing-box 1.13+ unified architecture"
-echo "Starting Caddy + sing-box services..."
+echo "GTACore (Rust) unified architecture"
+echo "Starting gtagate + gtacore services..."
 echo "========================================="
 
 # =========================================
 # 检查配置文件
 # =========================================
-if [ ! -f "/etc/caddy/Caddyfile" ]; then
-    echo "❌ ERROR: /etc/caddy/Caddyfile not found!"
-    echo "Please mount your Caddyfile to /etc/caddy/Caddyfile"
+if [ ! -f "$GTAGATE_CONFIG" ]; then
+    echo "❌ ERROR: $GTAGATE_CONFIG not found!"
+    echo "Please mount your gtagate config to $GTAGATE_CONFIG"
     exit 1
 fi
 
-echo "📝 Caddyfile found, validating..."
+echo "📝 gtagate config found, validating JSON..."
 
-# 验证 Caddyfile 格式
-if caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/tmp/caddy-validate.log 2>&1; then
-    echo "✅ Caddyfile validation passed"
+# 验证 JSON 格式
+if jq empty "$GTAGATE_CONFIG" >/tmp/gtagate-validate.log 2>&1; then
+    echo "✅ gtagate config validation passed"
 else
-    echo "❌ ERROR: Caddyfile validation failed!"
-    cat /tmp/caddy-validate.log
+    echo "❌ ERROR: gtagate config validation failed!"
+    cat /tmp/gtagate-validate.log
     exit 1
 fi
-rm -f /tmp/caddy-validate.log
+rm -f /tmp/gtagate-validate.log
 
 # =========================================
 # 检查 sing-box 配置
 # =========================================
-if [ ! -f "/etc/sing-box/config.json" ]; then
-    echo "❌ ERROR: /etc/sing-box/config.json not found!"
-    echo "Please mount your sing-box config to /etc/sing-box/config.json"
+if [ ! -f "$SINGBOX_MOUNTED_CONFIG" ]; then
+    echo "❌ ERROR: $SINGBOX_MOUNTED_CONFIG not found!"
+    echo "Please mount your sing-box config to $SINGBOX_MOUNTED_CONFIG"
     exit 1
 fi
 
 echo "📝 sing-box config found"
 
-# 复制配置到可写位置
-if ! cp /etc/sing-box/config.json /tmp/sing-box-config.json; then
-    echo "❌ ERROR: Failed to copy sing-box config to /tmp"
+# 复制到可写运行时配置。entrypoint 后续会执行兼容性迁移、IPv4 策略修正、证书路径更新，
+# 因此不能直接修改只读挂载配置。若挂载配置不可读，必须在启动早期明确失败。
+if ! cat "$SINGBOX_MOUNTED_CONFIG" > "$SINGBOX_RUNTIME_CONFIG"; then
+    echo "❌ ERROR: Cannot read $SINGBOX_MOUNTED_CONFIG or write $SINGBOX_RUNTIME_CONFIG"
+    echo "Please check host permissions. Recommended: chmod 644 singbox/config.json"
+    ls -ld /etc/sing-box "$SINGBOX_MOUNTED_CONFIG" /tmp 2>/dev/null || true
     exit 1
 fi
 
+if ! chmod 0644 "$SINGBOX_RUNTIME_CONFIG"; then
+    echo "❌ ERROR: Failed to set readable permissions on $SINGBOX_RUNTIME_CONFIG"
+    exit 1
+fi
+
+if ! jq empty "$SINGBOX_RUNTIME_CONFIG" >/tmp/sing-box-json-validate.log 2>&1; then
+    echo "❌ ERROR: $SINGBOX_MOUNTED_CONFIG is not valid JSON"
+    cat /tmp/sing-box-json-validate.log
+    rm -f /tmp/sing-box-json-validate.log
+    exit 1
+fi
+rm -f /tmp/sing-box-json-validate.log
+
+echo "✅ Runtime sing-box config prepared at $SINGBOX_RUNTIME_CONFIG"
+
 migrate_legacy_dns_servers() {
-    if ! jq -e 'any(.dns.servers[]?; (.address? != null) and (.address | type == "string"))' /tmp/sing-box-config.json >/dev/null 2>&1; then
+    if ! jq -e 'any(.dns.servers[]?; (.address? != null) and (.address | type == "string"))' "$SINGBOX_RUNTIME_CONFIG" >/dev/null 2>&1; then
         echo "✅ sing-box DNS server format is current"
         return 0
     fi
@@ -88,31 +109,65 @@ migrate_legacy_dns_servers() {
             .
           end;
         .dns.servers |= map(migrate_dns_server)
-    ' /tmp/sing-box-config.json > /tmp/sing-box-config.json.migrated; then
+    ' "$SINGBOX_RUNTIME_CONFIG" > "${SINGBOX_RUNTIME_CONFIG}.migrated"; then
         echo "❌ Failed to migrate legacy DNS server format"
-        rm -f /tmp/sing-box-config.json.migrated
+        rm -f "${SINGBOX_RUNTIME_CONFIG}.migrated"
         return 1
     fi
 
-    if jq -e 'any(.dns.servers[]?; .address? != null)' /tmp/sing-box-config.json.migrated >/dev/null 2>&1; then
+    if jq -e 'any(.dns.servers[]?; .address? != null)' "${SINGBOX_RUNTIME_CONFIG}.migrated" >/dev/null 2>&1; then
         echo "❌ Found unsupported legacy DNS server entries after migration"
-        rm -f /tmp/sing-box-config.json.migrated
+        rm -f "${SINGBOX_RUNTIME_CONFIG}.migrated"
         return 1
     fi
 
-    if ! mv /tmp/sing-box-config.json.migrated /tmp/sing-box-config.json; then
+    if ! mv "${SINGBOX_RUNTIME_CONFIG}.migrated" "$SINGBOX_RUNTIME_CONFIG"; then
         echo "❌ Failed to replace sing-box config after DNS migration"
-        rm -f /tmp/sing-box-config.json.migrated
+        rm -f "${SINGBOX_RUNTIME_CONFIG}.migrated"
         return 1
     fi
+
+    chmod 0644 "$SINGBOX_RUNTIME_CONFIG" 2>/dev/null || true
 
     echo "✅ Legacy sing-box DNS servers migrated to typed HTTPS format"
     return 0
 }
 
+enforce_ipv4_only_without_ipv6() {
+    # 无全局 IPv6 的主机（多数云 VM 默认如此，包括未显式启用 IPv6 的 Azure VM）上，
+    # 解析 AAAA 会让 gtacore 直连 IPv6 目标并必然失败（Network is unreachable, os error 101），
+    # 徒增 IPv4 回退前的延迟。此处自动把 DNS 解析策略降级为 ipv4_only。
+    # 检测方式：读 /proc/net/if_inet6（scope 列 == 00 即存在全局 IPv6 地址），无需 iproute2。
+    if awk '$4 == "00" { found = 1 } END { exit(found ? 0 : 1) }' /proc/net/if_inet6 2>/dev/null; then
+        return 0
+    fi
+
+    if ! jq -e 'has("dns")' "$SINGBOX_RUNTIME_CONFIG" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    _dns_strategy=$(jq -r '.dns.strategy // "unset"' "$SINGBOX_RUNTIME_CONFIG" 2>/dev/null)
+    if [ "$_dns_strategy" = "ipv4_only" ]; then
+        echo "ℹ️  未检测到全局 IPv6，DNS strategy 已是 ipv4_only"
+        return 0
+    fi
+
+    echo "⚠️  未检测到全局 IPv6 地址，将 DNS strategy 由 ${_dns_strategy} 强制为 ipv4_only（避免直连不可达的 IPv6）"
+    if jq '.dns.strategy = "ipv4_only"' "$SINGBOX_RUNTIME_CONFIG" > "${SINGBOX_RUNTIME_CONFIG}.ipv4" \
+        && mv "${SINGBOX_RUNTIME_CONFIG}.ipv4" "$SINGBOX_RUNTIME_CONFIG"; then
+        chmod 0644 "$SINGBOX_RUNTIME_CONFIG" 2>/dev/null || true
+        echo "✅ DNS strategy 已设为 ipv4_only"
+    else
+        echo "⚠️  设置 ipv4_only 失败，继续使用 ${_dns_strategy}"
+        rm -f "${SINGBOX_RUNTIME_CONFIG}.ipv4"
+    fi
+}
+
 if ! migrate_legacy_dns_servers; then
     exit 1
 fi
+
+enforce_ipv4_only_without_ipv6
 
 # =========================================
 # 检测配置类型 (使用 jq 精确解析 JSON)
@@ -122,23 +177,23 @@ HAS_ANYTLS=false
 HAS_ANYREALITY=false
 NEEDS_CERT=false
 
-if jq -e '.inbounds[]? | select(.type == "naive")' /tmp/sing-box-config.json >/dev/null 2>&1; then
+if jq -e '.inbounds[]? | select(.type == "naive")' "$SINGBOX_RUNTIME_CONFIG" >/dev/null 2>&1; then
     HAS_NAIVE=true
     echo "✅ Detected NaiveProxy inbound"
 fi
 
-if jq -e '.inbounds[]? | select(.type == "anytls")' /tmp/sing-box-config.json >/dev/null 2>&1; then
+if jq -e '.inbounds[]? | select(.type == "anytls")' "$SINGBOX_RUNTIME_CONFIG" >/dev/null 2>&1; then
     HAS_ANYTLS=true
     echo "✅ Detected AnyTLS inbound"
 fi
 
-if jq -e '.inbounds[]? | select(.tls?.reality?.enabled == true and .tls?.reality?.private_key != null)' /tmp/sing-box-config.json >/dev/null 2>&1; then
+if jq -e '.inbounds[]? | select(.tls?.reality?.enabled == true and .tls?.reality?.private_key != null)' "$SINGBOX_RUNTIME_CONFIG" >/dev/null 2>&1; then
     HAS_ANYREALITY=true
     echo "✅ Detected AnyReality inbound"
 fi
 
 # 检测是否需要证书 (naive 和非 reality 的 anytls 都需要证书)
-if jq -e '.inbounds[]? | select(.tls?.certificate_path != null)' /tmp/sing-box-config.json >/dev/null 2>&1; then
+if jq -e '.inbounds[]? | select(.tls?.certificate_path != null)' "$SINGBOX_RUNTIME_CONFIG" >/dev/null 2>&1; then
     NEEDS_CERT=true
     echo "📋 Certificate required for TLS inbounds"
 fi
@@ -152,57 +207,50 @@ fi
 # =========================================
 # 信号处理 (优雅退出)
 # =========================================
+
+# 可中断 sleep：后台 sleep + wait，使 trap 能立即打断长等待
+isleep() { sleep "$1" & wait $!; }
+
 cleanup() {
     echo "🛑 Received stop signal, shutting down gracefully..."
     # Send SIGTERM to all managed processes
-    for _pid_var in SINGBOX_PID CADDY_PID LOG_TAIL_PID; do
+    for _pid_var in SINGBOX_PID GATE_PID LOG_TAIL_PID; do
         eval "_pid=\$$_pid_var"
         if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null; then
             echo "🛑 Stopping $_pid_var (PID $_pid)..."
             kill -TERM "$_pid" 2>/dev/null
         fi
     done
-    # Wait up to 10s for graceful shutdown, then SIGKILL
-    _timeout=10
-    while [ $_timeout -gt 0 ]; do
-        _any_alive=false
-        for _pid_var in SINGBOX_PID CADDY_PID; do
-            eval "_pid=\$$_pid_var"
-            if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null; then
-                _any_alive=true
-            fi
-        done
-        if [ "$_any_alive" = "false" ]; then break; fi
-        sleep 1
-        _timeout=$((_timeout - 1))
-    done
-    # Force kill any remaining processes
-    for _pid_var in SINGBOX_PID CADDY_PID LOG_TAIL_PID; do
+    # 8s 看门狗：留 Docker 10s grace period 2s 余量，超时强杀
+    ( sleep 8; for _v in SINGBOX_PID GATE_PID LOG_TAIL_PID; do
+        eval "_p=\$$_v"; [ -n "$_p" ] && kill -9 "$_p" 2>/dev/null
+    done ) & _wd_pid=$!
+    # 用 wait 真正回收子进程（避免 kill -0 轮询僵尸永远成立的 bug）
+    for _pid_var in SINGBOX_PID GATE_PID LOG_TAIL_PID; do
         eval "_pid=\$$_pid_var"
-        if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null; then
-            echo "⚠️  Force killing $_pid_var (PID $_pid)..."
-            kill -9 "$_pid" 2>/dev/null
-        fi
+        [ -n "$_pid" ] && wait "$_pid" 2>/dev/null
     done
-    wait 2>/dev/null
+    kill "$_wd_pid" 2>/dev/null; wait "$_wd_pid" 2>/dev/null
     echo "✅ Shutdown complete."
     exit 0
 }
 
-trap cleanup SIGTERM SIGINT SIGQUIT
+# 注意：dash（debian /bin/sh）不接受 SIG 前缀（`trap: SIGTERM: bad trap`），
+# 必须用 POSIX 裸名 TERM/INT/QUIT，否则 trap 根本不会安装、cleanup 永不触发。
+trap cleanup TERM INT QUIT
 
 # =========================================
-# 启动 Caddy (用于 L4 分流和证书申请)
+# 启动 gtagate (用于 L4 分流和证书申请)
 # =========================================
-echo "🚀 Starting Caddy..."
-caddy run --config /etc/caddy/Caddyfile --adapter caddyfile &
-CADDY_PID=$!
+echo "🚀 Starting gtagate..."
+gtagate "$GTAGATE_CONFIG" &
+GATE_PID=$!
 sleep 2
-if ! kill -0 "$CADDY_PID" 2>/dev/null; then
-    echo "❌ Caddy failed to start (exited within 2s)"
+if ! kill -0 "$GATE_PID" 2>/dev/null; then
+    echo "❌ gtagate failed to start (exited within 2s)"
     exit 1
 fi
-echo "✅ Caddy started with PID: $CADDY_PID"
+echo "✅ gtagate started with PID: $GATE_PID"
 
 # =========================================
 # 等待证书后启动 sing-box
@@ -212,6 +260,16 @@ CERT_RETRY_INTERVAL="${CERT_RETRY_INTERVAL:-30}"
 CERT_RETRY_MAX="${CERT_RETRY_MAX:-10}"
 SINGBOX_RESTART_ATTEMPTS=0
 SINGBOX_MAX_RESTART_ATTEMPTS=10
+GTACORE_TOKEN_FILE="${GTACORE_TOKEN_FILE:-/tmp/gtacore-token}"
+
+# gtacore 控制面 (127.0.0.1:19810) 需要 token；仅 loopback，容器不暴露该端口
+ensure_gtacore_token() {
+    if [ -s "$GTACORE_TOKEN_FILE" ]; then
+        return 0
+    fi
+    head -c 32 /dev/urandom | base64 | tr -d '\n' > "$GTACORE_TOKEN_FILE"
+    chmod 600 "$GTACORE_TOKEN_FILE"
+}
 
 ensure_singbox_log_forwarder() {
     mkdir -p /var/log/sing-box
@@ -228,48 +286,50 @@ ensure_singbox_log_forwarder() {
 stop_singbox() {
     if [ -n "$SINGBOX_PID" ] && kill -0 "$SINGBOX_PID" 2>/dev/null; then
         kill -TERM "$SINGBOX_PID" 2>/dev/null
-        wait "$SINGBOX_PID" 2>/dev/null
+        _stop_timeout=10
+        while [ $_stop_timeout -gt 0 ] && kill -0 "$SINGBOX_PID" 2>/dev/null; do
+            sleep 1
+            _stop_timeout=$((_stop_timeout - 1))
+        done
+        if kill -0 "$SINGBOX_PID" 2>/dev/null; then
+            echo "⚠️  gtacore did not stop within 10s, force killing PID $SINGBOX_PID..."
+            kill -9 "$SINGBOX_PID" 2>/dev/null
+        fi
+        wait "$SINGBOX_PID" 2>/dev/null || true
     fi
     SINGBOX_PID=""
 }
 
 reload_singbox() {
-    if [ -z "$SINGBOX_PID" ] || ! kill -0 "$SINGBOX_PID" 2>/dev/null; then
-        return 1
-    fi
-
+    # gtacore 无 SIGHUP 热重载，证书更新需重启进程
     if ! validate_singbox_config; then
-        echo "❌ Skipping sing-box reload because config validation failed"
+        echo "❌ Skipping gtacore reload because config validation failed"
         return 1
     fi
 
-    if ! kill -HUP "$SINGBOX_PID" 2>/dev/null; then
-        echo "❌ Failed to send HUP to sing-box"
-        return 1
-    fi
+    stop_singbox
+    sleep 1
+    start_singbox
 
-    sleep 3
-
-    if kill -0 "$SINGBOX_PID" 2>/dev/null; then
-        echo "✅ sing-box reloaded successfully"
+    if [ -n "$SINGBOX_PID" ] && kill -0 "$SINGBOX_PID" 2>/dev/null; then
+        echo "✅ gtacore reloaded (restarted) successfully"
         return 0
     fi
 
-    echo "❌ sing-box exited after reload signal"
-    SINGBOX_PID=""
+    echo "❌ gtacore failed to start after reload"
     return 1
 }
 
 validate_singbox_config() {
     VALIDATE_LOG="/tmp/sing-box-check.log"
 
-    if sing-box check -c /tmp/sing-box-config.json >"$VALIDATE_LOG" 2>&1; then
-        echo "✅ sing-box config validation passed"
+    if gtacore sing-box check -c "$SINGBOX_RUNTIME_CONFIG" >"$VALIDATE_LOG" 2>&1; then
+        echo "✅ gtacore config validation passed"
         rm -f "$VALIDATE_LOG"
         return 0
     fi
 
-    echo "❌ sing-box config validation failed!"
+    echo "❌ gtacore config validation failed!"
     cat "$VALIDATE_LOG"
     rm -f "$VALIDATE_LOG"
     return 1
@@ -291,17 +351,18 @@ start_singbox() {
     fi
 
     echo ""
-    echo "🚀 Starting sing-box..."
+    echo "🚀 Starting gtacore..."
 
     if ! validate_singbox_config; then
-        echo "⚠️  Skipping sing-box start until config is fixed..."
-        return 1
+        echo "❌ Fatal: gtacore config is invalid or unreadable; exiting instead of running a degraded container"
+        exit 1
     fi
 
+    ensure_gtacore_token
     ensure_singbox_log_forwarder
-    sing-box run -c /tmp/sing-box-config.json >> "$SINGBOX_LOG_FILE" 2>&1 &
+    gtacore run --config "$SINGBOX_RUNTIME_CONFIG" --token-file "$GTACORE_TOKEN_FILE" >> "$SINGBOX_LOG_FILE" 2>&1 &
     SINGBOX_PID=$!
-    echo "✅ sing-box started with PID: $SINGBOX_PID"
+    echo "✅ gtacore started with PID: $SINGBOX_PID"
 
     sleep 3
     if kill -0 "$SINGBOX_PID" 2>/dev/null; then
@@ -324,7 +385,11 @@ start_singbox() {
         tail -30 "$SINGBOX_LOG_FILE" 2>/dev/null || echo "No log file"
         stop_singbox
         echo ""
-        echo "⚠️  Continuing with Caddy only..."
+        if [ -f /tmp/gtagod-singbox-required ]; then
+            echo "❌ Fatal: gtacore is required for configured inbounds; exiting instead of running a degraded container"
+            exit 1
+        fi
+        echo "⚠️  Continuing with gtagate only..."
     fi
 }
 
@@ -333,7 +398,7 @@ if [ "$NEEDS_CERT" = "true" ]; then
     echo "🔍 Waiting for SSL certificates..."
     
     # 提取域名信息 (使用 jq 精确解析)
-    DOMAIN=$(jq -r '[.inbounds[]? | .tls?.server_name // empty] | first // empty' /tmp/sing-box-config.json 2>/dev/null)
+    DOMAIN=$(jq -r '[.inbounds[]? | .tls?.server_name // empty] | first // empty' "$SINGBOX_RUNTIME_CONFIG" 2>/dev/null)
     ROOT_DOMAIN=$(echo "$DOMAIN" | awk -F. '{if(NF>=2) print $(NF-1)"."$NF; else print $0}')
     if [ -z "$ROOT_DOMAIN" ]; then
         ROOT_DOMAIN="example.com"
@@ -372,15 +437,16 @@ if [ "$NEEDS_CERT" = "true" ]; then
         echo "🔧 Updating sing-box config with certificate paths..."
         if ! jq --arg cert "$ACTUAL_CERT" --arg key "$ACTUAL_KEY" \
             '(.inbounds[] | select(.tls?.certificate_path != null) | .tls) |= (.certificate_path = $cert | .key_path = $key)' \
-            /tmp/sing-box-config.json > /tmp/sing-box-config.json.tmp; then
+            "$SINGBOX_RUNTIME_CONFIG" > "${SINGBOX_RUNTIME_CONFIG}.tmp"; then
             echo "❌ Failed to update certificate paths with jq"
-            rm -f /tmp/sing-box-config.json.tmp
+            rm -f "${SINGBOX_RUNTIME_CONFIG}.tmp"
             return 1
         fi
-        if ! mv /tmp/sing-box-config.json.tmp /tmp/sing-box-config.json; then
+        if ! mv "${SINGBOX_RUNTIME_CONFIG}.tmp" "$SINGBOX_RUNTIME_CONFIG"; then
             echo "❌ Failed to replace sing-box config after cert path update"
             return 1
         fi
+        chmod 0644 "$SINGBOX_RUNTIME_CONFIG" 2>/dev/null || true
         echo "✅ Certificate paths updated: $ACTUAL_CERT"
     }
     
@@ -402,14 +468,13 @@ if [ "$NEEDS_CERT" = "true" ]; then
     fi
     
     if [ "$CERT_FOUND" = "false" ]; then
-        echo "⏳ No existing cert found, waiting for Caddy to request certificate..."
-        sleep 10
+        echo "⏳ No existing cert found, waiting for gtagate to request certificate..."
+        isleep 10
         WAIT_COUNT=10
     fi
     
     while [ "$CERT_FOUND" = "false" ] && [ $WAIT_COUNT -lt $MAX_WAIT ]; do
         ACTUAL_CERT=$(find_certificate)
-        
         if [ -n "$ACTUAL_CERT" ] && [ -f "$ACTUAL_CERT" ]; then
             ACTUAL_KEY="${ACTUAL_CERT%.crt}.key"
             
@@ -423,9 +488,14 @@ if [ "$NEEDS_CERT" = "true" ]; then
         fi
         
         if [ "$CERT_FOUND" = "false" ]; then
-            sleep 3
+            # 检查 gtagate 是否仍然存活（若已崩溃则证书永远不会到达）
+            if ! kill -0 "$GATE_PID" 2>/dev/null; then
+                echo "❌ gtagate died during certificate wait; exiting"
+                exit 1
+            fi
+            isleep 3
             WAIT_COUNT=$((WAIT_COUNT + 3))
-            if [ $((WAIT_COUNT % 15)) -eq 0 ]; then
+            if [ $((WAIT_COUNT % 3)) -lt 3 ] && [ $((WAIT_COUNT / 15 * 15)) -eq $WAIT_COUNT ]; then
                 echo "⏳ Waiting for certificate... (${WAIT_COUNT}s/${MAX_WAIT}s)"
                 ls -la /data/caddy/certificates/ 2>/dev/null || echo "   Directory not ready"
             fi
@@ -433,7 +503,10 @@ if [ "$NEEDS_CERT" = "true" ]; then
     done
     
     if [ "$CERT_FOUND" = "true" ]; then
-        update_cert_paths
+        if ! update_cert_paths; then
+            echo "❌ Fatal: failed to update certificate paths"
+            exit 1
+        fi
         start_singbox
     else
         echo "⚠️  Timeout waiting for certificate after ${MAX_WAIT}s"
@@ -442,11 +515,16 @@ if [ "$NEEDS_CERT" = "true" ]; then
         RETRY_COUNT=0
         while [ "$CERT_FOUND" = "false" ]; do
             if [ "$CERT_RETRY_MAX" != "0" ] && [ $RETRY_COUNT -ge $CERT_RETRY_MAX ]; then
-                echo "❌ Reached max retry count (${CERT_RETRY_MAX}), sing-box will remain stopped"
-                break
+                echo "❌ Reached max retry count (${CERT_RETRY_MAX}); exiting container to trigger restart"
+                exit 1
             fi
 
-            sleep "$CERT_RETRY_INTERVAL"
+            # 检查 gtagate 是否仍然存活
+            if ! kill -0 "$GATE_PID" 2>/dev/null; then
+                echo "❌ gtagate died during certificate retry; exiting"
+                exit 1
+            fi
+            isleep "$CERT_RETRY_INTERVAL"
             RETRY_COUNT=$((RETRY_COUNT + 1))
 
             ACTUAL_CERT=$(find_certificate)
@@ -456,7 +534,10 @@ if [ "$NEEDS_CERT" = "true" ]; then
                     echo "✅ Found certificate on retry #${RETRY_COUNT}: $ACTUAL_CERT"
                     echo "✅ Found key: $ACTUAL_KEY"
                     CERT_FOUND=true
-                    update_cert_paths
+                    if ! update_cert_paths; then
+                        echo "❌ Fatal: failed to update certificate paths"
+                        exit 1
+                    fi
                     start_singbox
                     break
                 fi
@@ -474,18 +555,18 @@ fi
 echo ""
 echo "========================================="
 echo "✅ GTAGod Container v${VERSION} initialized"
-echo "📊 Caddy PID: $CADDY_PID"
+echo "📊 gtagate PID: $GATE_PID"
 if [ -n "$SINGBOX_PID" ] && kill -0 "$SINGBOX_PID" 2>/dev/null; then
-    echo "📊 sing-box PID: $SINGBOX_PID"
+    echo "📊 gtacore PID: $SINGBOX_PID"
 fi
 echo "========================================="
 
-# 保持容器运行，同时监控 Caddy 和 sing-box
+# 保持容器运行，同时监控 gtagate 和 sing-box
 # =========================================
 # 进程监控 + 证书自动重载
 # =========================================
 # 每 10 秒检查一次:
-#   1. Caddy 是否存活
+#   1. gtagate 是否存活
 #   2. sing-box 是否存活（如果应该运行的话）
 #   3. 证书文件是否更新（自动重载 sing-box）
 # =========================================
@@ -496,9 +577,9 @@ if [ "$NEEDS_CERT" = "true" ] && [ -n "$ACTUAL_CERT" ] && [ -f "$ACTUAL_CERT" ];
 fi
 
 while true; do
-    # 检查 Caddy 是否存活
-    if ! kill -0 "$CADDY_PID" 2>/dev/null; then
-        echo "❌ Caddy (PID $CADDY_PID) has exited unexpectedly!"
+    # 检查 gtagate 是否存活
+    if ! kill -0 "$GATE_PID" 2>/dev/null; then
+        echo "❌ gtagate (PID $GATE_PID) has exited unexpectedly!"
         echo "🔄 Exiting container to trigger restart..."
         exit 1
     fi
@@ -512,7 +593,7 @@ while true; do
         fi
         RESTART_DELAY=$(get_singbox_restart_delay "$SINGBOX_RESTART_ATTEMPTS")
         echo "⚠️  sing-box (PID $SINGBOX_PID) has exited, attempting restart #${SINGBOX_RESTART_ATTEMPTS}/${SINGBOX_MAX_RESTART_ATTEMPTS} after ${RESTART_DELAY}s..."
-        sleep "$RESTART_DELAY"
+        isleep "$RESTART_DELAY"
         start_singbox
         if [ -n "$SINGBOX_PID" ] && kill -0 "$SINGBOX_PID" 2>/dev/null; then
             echo "✅ sing-box restarted successfully (PID $SINGBOX_PID)"
@@ -527,7 +608,10 @@ while true; do
         if [ -n "$NEW_MTIME" ] && [ -n "$CERT_MTIME" ] && [ "$NEW_MTIME" != "$CERT_MTIME" ]; then
             echo "🔄 Certificate updated, reloading sing-box..."
             CERT_MTIME="$NEW_MTIME"
-            update_cert_paths
+            if ! update_cert_paths; then
+                echo "❌ Failed to update certificate paths after cert change; skipping reload"
+                continue
+            fi
             if [ -n "$SINGBOX_PID" ] && kill -0 "$SINGBOX_PID" 2>/dev/null; then
                 if reload_singbox; then
                     echo "✅ sing-box reloaded with new certificate"

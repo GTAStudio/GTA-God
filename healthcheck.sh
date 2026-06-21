@@ -6,8 +6,8 @@ if [ ! -f "$CONFIG_PATH" ]; then
     CONFIG_PATH="/etc/sing-box/config.json"
 fi
 
-# Caddy must always be running
-pgrep -x caddy >/dev/null 2>&1 || { echo "healthcheck: caddy not running" >&2; exit 1; }
+# gtagate must always be running
+pgrep -x gtagate >/dev/null 2>&1 || { echo "healthcheck: gtagate not running" >&2; exit 1; }
 
 # Verify gtagate is actually accepting connections (not just alive but hung).
 # nc (netcat-openbsd) is installed in the image; procfs fallback for minimal images.
@@ -22,12 +22,12 @@ elif [ -r /proc/net/tcp ] || [ -r /proc/net/tcp6 ]; then
 fi
 
 if [ -f /tmp/gtagod-singbox-required ]; then
-    pgrep -x sing-box >/dev/null 2>&1 || { echo "healthcheck: sing-box required but not running" >&2; exit 1; }
+    pgrep -x gtacore >/dev/null 2>&1 || { echo "healthcheck: gtacore required but not running" >&2; exit 1; }
 fi
 
-# Verify certificate files once sing-box is running.
-if pgrep -x sing-box >/dev/null 2>&1; then
-    # sing-box is running, verify certificate if configured
+# Verify certificate files once gtacore is running.
+if pgrep -x gtacore >/dev/null 2>&1; then
+    # gtacore is running, verify certificate if configured
     if [ -f "$CONFIG_PATH" ]; then
         CERT_PATH=$(jq -r '..|.certificate_path? // empty' "$CONFIG_PATH" 2>/dev/null | head -n 1)
         if [ -n "$CERT_PATH" ]; then

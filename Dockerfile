@@ -1,159 +1,149 @@
 # syntax=docker/dockerfile:1
 # =========================================
-# GTAGod Dockerfile - sing-box 1.13.x 统一架构
-# 版本: 4.2.1
-# 更新: 2026-06-16
+# GTAGod Dockerfile - GTACore (Rust) 统一架构
+# 版本: 0.0.1
+# 更新: 2026-06-04
 # =========================================
 #
-# 此版本固定使用 sing-box 1.13.x 最新稳定版原生 naive inbound
-# 不再需要 Caddy forwardproxy 插件
-# 所有代理协议由 sing-box 统一处理
+# 此版本用 GTACore (Rust, sing-box 兼容) 完全替代 sing-box，
+# 原生处理 naive + anytls + anyreality（anyreality 所需 uTLS sidecar 已内嵌）。
 #
-# 架构:
-#   - Caddy: L4 SNI 分流 + ACME 证书申请
-#   - sing-box 1.13.x: naive + anytls + anyreality
+# 架构 (v0.0.1):
+#   - gtagate (Rust): L4 SNI 分流 + ACME 证书申请 (替代 Caddy)
+#   - gtacore (Rust): naive + anytls + anyreality (替代 sing-box)
 #
-# 依赖版本 (2026-06-16 更新):
-#   - Go: 1.26.4 (sing-box 1.13.x 需要 Go 1.24+)
-#   - Alpine: 3.23 (当前 Docker Hub latest 稳定版)
-#   - xcaddy: v0.4.5
-#   - Caddy: v2.11.4 (含安全修复 GHSA-vcc4-2c75-vc9v)
-#   - sing-box: 1.13.13 (当前 1.13.x 最新稳定版)
-#   - caddy-dns/cloudflare: v0.2.4
-#   - mholt/caddy-l4: v0.1.1
+# 依赖版本 (2026-06-04 更新):
+#   - Rust: 1.96 (edition 2024，需要 rustc >= 1.85)
+#   - gtagate: 本仓库 gateway/ (musl 静态, tokio + rustls + instant-acme)
+#   - gtacore: 预构建 glibc 二进制 bin/gtacore (含内嵌 libutls.so)
+#   - 运行镜像: debian 13-slim (glibc 2.41，满足 gtacore 需求 GLIBC_2.39；代理高吞吞性能优于 musl)
 #
 # =========================================
 
-ARG GO_VERSION=1.26.4
+ARG RUST_VERSION=1.96
 ARG ALPINE_VERSION=3.23
+ARG DEBIAN_VERSION=13-slim
 
-# 构建阶段 - 使用 Alpine 基础镜像
-# Go 1.26.4 + Alpine 3.23 稳定版，遵循稳定工具链实践
-FROM golang:${GO_VERSION}-alpine${ALPINE_VERSION} AS builder
+# =========================================
+# 构建阶段 1 - gtagate (Rust L4 网关 + ACME)
+# =========================================
+FROM rust:${RUST_VERSION}-alpine AS rust-builder
 
-# 构建参数 - sing-box 1.13.x 支持 naive inbound
-# Caddy 2.11+ 需要 Go 1.25+ 编译
-ARG CADDY_VERSION=v2.11.4
-ARG XCADDY_VERSION=v0.4.5
-ARG SINGBOX_VERSION=1.13.13
-ARG CADDY_DNS_CLOUDFLARE_VERSION=v0.2.4
-ARG CADDY_L4_VERSION=v0.1.1
+# aws-lc-rs (rustls/instant-acme 默认后端) 需要 C 工具链 + cmake + perl
+RUN apk add --no-cache musl-dev cmake make gcc g++ perl pkgconfig
 
-# 固定使用镜像内稳定 Go 工具链，避免自动下载带来的不可重复构建
-ENV GOTOOLCHAIN=local
+WORKDIR /build
+# 先拷依赖清单以利用层缓存
+COPY gateway/Cargo.toml gateway/Cargo.lock ./
+COPY gateway/src ./src
 
-# 安装构建依赖
-RUN apk upgrade --no-cache && \
-    apk add --no-cache git ca-certificates curl jq
+# --locked 确保与提交的 Cargo.lock 可重复构建
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/build/target \
+    cargo build --release --locked && \
+    strip target/release/gtagate && \
+    cp target/release/gtagate /usr/local/bin/gtagate
 
-# 安装 xcaddy
-RUN --mount=type=cache,target=/root/.cache/go-build \
-    --mount=type=cache,target=/go/pkg/mod \
-    go install github.com/caddyserver/xcaddy/cmd/xcaddy@${XCADDY_VERSION}
-
-# 构建 Caddy - 仅需要 cloudflare DNS 和 layer4 插件
-# sing-box 1.13.x 处理所有代理协议，不再需要 forwardproxy
-RUN --mount=type=cache,target=/root/.cache/go-build \
-    --mount=type=cache,target=/go/pkg/mod \
-    xcaddy build ${CADDY_VERSION} \
-        --with github.com/caddy-dns/cloudflare@${CADDY_DNS_CLOUDFLARE_VERSION} \
-        --with github.com/mholt/caddy-l4@${CADDY_L4_VERSION} \
-        --output /usr/bin/caddy
-
-# 下载 sing-box 1.13.x (支持 naive inbound)
-# 使用 TARGETARCH 支持 buildx 多架构构建
-# Alpine 使用 musl libc，必须下载 musl 版本
-ARG TARGETARCH
-RUN set -ex && \
-    case "${SINGBOX_VERSION}" in 1.13.*) ;; *) echo "SINGBOX_VERSION must stay on latest 1.13.x stable, got ${SINGBOX_VERSION}"; exit 1 ;; esac && \
-    TARGETARCH=${TARGETARCH:-amd64} && \
-    echo "==> TARGETARCH=${TARGETARCH}" && \
-    if [ "$TARGETARCH" = "amd64" ]; then ARCH="amd64"; \
-    elif [ "$TARGETARCH" = "arm64" ]; then ARCH="arm64"; \
-    else echo "Unsupported arch: $TARGETARCH"; exit 1; fi && \
-    ASSET_NAME="sing-box-${SINGBOX_VERSION}-linux-${ARCH}-musl.tar.gz" && \
-    echo "==> Downloading sing-box v${SINGBOX_VERSION} for ${ARCH} (musl)..." && \
-    EXPECTED_DIGEST=$(curl -fsSL \
-        --retry 5 \
-        --retry-all-errors \
-        --connect-timeout 15 \
-        "https://api.github.com/repos/SagerNet/sing-box/releases/tags/v${SINGBOX_VERSION}" \
-        | jq -r --arg asset "$ASSET_NAME" '.assets[] | select(.name == $asset) | .digest') && \
-    [ -n "$EXPECTED_DIGEST" ] && [ "$EXPECTED_DIGEST" != "null" ] || { echo "Missing digest for $ASSET_NAME"; exit 1; } && \
-    curl -fsSL \
-        --retry 5 \
-        --retry-all-errors \
-        --connect-timeout 15 \
-        -o /tmp/sing-box.tar.gz \
-        "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/${ASSET_NAME}" && \
-    echo "${EXPECTED_DIGEST#sha256:}  /tmp/sing-box.tar.gz" | sha256sum -c - && \
-    tar -xzf /tmp/sing-box.tar.gz -C /tmp && \
-    cp /tmp/sing-box-*/sing-box /usr/bin/sing-box && \
-    chmod +x /usr/bin/sing-box && \
-    /usr/bin/sing-box version && \
-    rm -rf /tmp/sing-box*
-
-# 运行阶段 - 使用 Alpine 3.23 (当前 Docker Hub latest 稳定版)
-# 构建时执行 apk upgrade，确保基础包使用该发行版最新安全修复
-FROM alpine:${ALPINE_VERSION}
+# 运行阶段 - debian 13-slim (glibc 2.41)
+# gtacore 为 glibc 二进制；debian glibc 在代理高并发/加解密负载下吞吞优于 musl。
+# gtagate 为 musl 静态二进制，可在 glibc 系统直接运行。
+FROM debian:${DEBIAN_VERSION}
 
 # 元数据
 LABEL maintainer="gtagod" \
-    description="GTAGod - sing-box 1.13.x (naive + anytls + anyreality) with Caddy L4" \
-    version="4.2.1"
+    description="GTAGod - GTACore (Rust, naive + anytls + anyreality) with gtagate L4" \
+    version="0.0.1"
 
 # 一次性安装所有依赖并创建目录，减少镜像层
-RUN apk upgrade --no-cache && \
-    apk add --no-cache \
+# procps 提供 pgrep/ps：healthcheck.sh 与 run.sh 的存活检测统一用 `pgrep -x gtagate/gtacore`，
+# 缺失时 pgrep 返回 127 会被误判为“进程未运行”，导致容器永远 unhealthy。
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
         ca-certificates \
-        libcap \
+        libcap2-bin \
+        netcat-openbsd \
+        procps \
+        tini \
         tzdata \
-        jq \
-        procps-ng && \
+        jq && \
+    rm -rf /var/lib/apt/lists/* && \
     # 设置时区
-    cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \
+    ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \
     echo "Asia/Shanghai" > /etc/timezone && \
-    # 创建目录结构
+    # 创建目录结构 (cert 目录沿用 /data/caddy 以兼容历史卷与 find_certificate)
     mkdir -p \
         /config/caddy \
         /data/caddy \
         /var/log/caddy \
-        /etc/caddy \
+        /etc/gtagate \
         /etc/sing-box \
         /var/log/sing-box
 
-# 复制编译好的 caddy 和 sing-box
-COPY --from=builder --chmod=755 /usr/bin/caddy /usr/bin/caddy
-COPY --from=builder --chmod=755 /usr/bin/sing-box /usr/bin/sing-box
+# 创建非 root 用户（配合 setcap 和 --cap-add=NET_BIND_SERVICE 实现最小权限）
+RUN useradd -r -s /usr/sbin/nologin -d /nonexistent gtagate && \
+    chown gtagate:gtagate /config /data /var/log/caddy /var/log/sing-box
 
-# 设置权限并验证版本
-RUN caddy version && \
-    caddy list-modules | grep -E "(layer4|cloudflare)" && \
-    sing-box version
+# 复制 gtagate (musl 静态, 来自构建阶段) 与 gtacore (本地预构建 glibc 二进制)
+COPY --from=rust-builder --chmod=755 /usr/local/bin/gtagate /usr/bin/gtagate
+COPY --chmod=755 bin/gtacore /usr/bin/gtacore
+COPY bin/gtacore.sha256 /tmp/gtacore.sha256
+RUN set -e; \
+    EXPECTED=$(awk '{print $1}' /tmp/gtacore.sha256); \
+    ACTUAL=$(sha256sum /usr/bin/gtacore | awk '{print $1}'); \
+    if [ "$EXPECTED" != "$ACTUAL" ]; then \
+        echo "FATAL: gtacore integrity check failed!"; \
+        echo "  expected: $EXPECTED"; \
+        echo "  actual:   $ACTUAL"; \
+        exit 1; \
+    fi; \
+    rm -f /tmp/gtacore.sha256
+
+# 加固：赋予 gtagate 绑定特权端口(443)的 file capability，
+# 使其在 docker run --cap-drop=ALL --cap-add=NET_BIND_SERVICE 下仍可监听 443，
+# 无需容器以 root 全权运行。
+RUN setcap 'cap_net_bind_service=+ep' /usr/bin/gtagate
+
+# 验证版本 (同时验证 musl gtagate 在 glibc 运行、gtacore 内嵌 sidecar)
+RUN gtagate --version && \
+    gtacore sing-box version
+
+# 内置 sing-box 配置模板：供 run.sh 在服务器端通过
+# `docker run --rm --entrypoint cat <image> /opt/gtagod/templates/<name>` 提取，
+# 从而免去在服务器单独上传这些模板文件
+COPY --chmod=644 \
+    singbox-config.naive.example \
+    singbox-config.anytls-combo.example \
+    singbox-config.anyreality-combo.example \
+    singbox-config.l4.example \
+    gtagod.conf.example \
+    /opt/gtagod/templates/
 
 # 环境变量
 ENV XDG_CONFIG_HOME=/config \
     XDG_DATA_HOME=/data \
     TZ=Asia/Shanghai
 
-# 暴露端口
-EXPOSE 80 443
+# 暴露端口 (gtagate 仅需 443；ACME 采用 DNS-01，无需 80)
+EXPOSE 443
 
 # 数据卷
 VOLUME ["/config", "/data", "/var/log/caddy", "/etc/sing-box", "/var/log/sing-box"]
 
 # 工作目录
-WORKDIR /config/caddy
+WORKDIR /data/caddy
 
 STOPSIGNAL SIGTERM
+
+# 默认非 root 运行（setcap + --cap-add=NET_BIND_SERVICE 确保可绑 443）
+USER gtagate
 
 # 复制启动脚本
 COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY --chmod=755 healthcheck.sh /usr/local/bin/healthcheck.sh
 
-# 健康检查 - Caddy + sing-box + 证书就绪状态
-HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=3 \
+# 健康检查 - gtagate + sing-box + 证书就绪状态
+HEALTHCHECK --interval=30s --timeout=10s --start-period=300s --start-interval=5s --retries=3 \
     CMD /usr/local/bin/healthcheck.sh
 
 # 启动命令
-ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
