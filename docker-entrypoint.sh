@@ -32,8 +32,12 @@ echo "GTACore (Rust) unified architecture"
 echo "Starting gtagate + gtacore services..."
 echo "========================================="
 
-# 尽力提升文件描述符软上限（高并发代理；容器通常已由 docker run --ulimit 设好硬上限，此处兜底）。
-ulimit -n 65536 2>/dev/null || true
+# 收紧默认权限：后续 cat/jq>tmp 创建的运行时配置(含 reality 私钥)默认即 0600，
+# 关闭“先 0644 再 chmod”之间的瞬时世界可读窗口。
+umask 077
+
+# 尽力提升文件描述符软上限（只抬软上限，不降 docker run --ulimit 设好的硬上限）。
+ulimit -Sn 65536 2>/dev/null || true
 
 # =========================================
 # 检查配置文件
@@ -71,7 +75,7 @@ echo "📝 sing-box config found"
 # 因此不能直接修改只读挂载配置。若挂载配置不可读，必须在启动早期明确失败。
 if ! cat "$SINGBOX_MOUNTED_CONFIG" > "$SINGBOX_RUNTIME_CONFIG"; then
     echo "❌ ERROR: Cannot read $SINGBOX_MOUNTED_CONFIG or write $SINGBOX_RUNTIME_CONFIG"
-    echo "Please check host permissions. Recommended: chmod 644 singbox/config.json"
+    echo "Please check host permissions. Recommended: chown 65532:65532 singbox/config.json && chmod 640 (未 chown 时用 0644)"
     ls -ld /etc/sing-box "$SINGBOX_MOUNTED_CONFIG" /tmp 2>/dev/null || true
     exit 1
 fi

@@ -59,11 +59,18 @@ pub async fn run(cfg: Arc<Config>, cancel: CancellationToken) -> anyhow::Result<
 
     loop {
         // 在 accept 之前先取并发许可，达到上限时自然背压（不会无界堆积）。
+        // 用 select! 包裹 acquire，确保在 max_connections 处 park 时仍能立即观察到 cancel。
         let permit = match &limiter {
-            Some(sem) => match Arc::clone(sem).acquire_owned().await {
-                Ok(p) => Some(p),
-                Err(_) => break, // 信号量已关闭，正常退出。
-            },
+            Some(sem) => {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => break,
+                    p = Arc::clone(sem).acquire_owned() => match p {
+                        Ok(p) => Some(p),
+                        Err(_) => break, // 信号量已关闭，正常退出。
+                    },
+                }
+            }
             None => None,
         };
 
@@ -246,9 +253,9 @@ async fn copy_bidirectional_splice(client: &TcpStream, upstream: &TcpStream) -> 
         r
     };
 
-    // 两个方向各自跑到 EOF，正确处理半关闭；任一方向出错则返回该错误。
-    let (r1, r2) = tokio::join!(c2u, u2c);
-    r1.and(r2)
+    // try_join!：任一方向出错立即返回并丢弃另一方向（释放 permit/fd，避免对端 idle 时 join 永挂）；
+    // 两个方向都正常 EOF 时仍等待双方完成，保持 TCP 半关闭语义。
+    tokio::try_join!(c2u, u2c).map(|_| ())
 }
 
 /// 单方向 splice 循环：src socket → pipe → dst socket。

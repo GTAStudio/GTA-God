@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 const DEFAULT_CONFIG_PATH: &str = "/etc/gtagate/config.json";
@@ -83,11 +83,12 @@ async fn main() -> anyhow::Result<()> {
         _ = shutdown_signal() => {
             info!("收到退出信号，gtagate 正在优雅关闭");
             cancel.cancel();
-            // 等待分流器把活跃连接 drain 完（其内部 30s drain 超时会先触发）。
-            match dispatcher.await {
-                Ok(Ok(())) => info!("分流器已优雅退出"),
-                Ok(Err(e)) => error!(error = %e, "分流器退出时报错"),
-                Err(e) => error!(error = %e, "分流器任务 join 失败"),
+            // 等待分流器把活跃连接 drain 完（其内部 30s drain 超时会先触发，此处 35s 为兜底上限）。
+            match tokio::time::timeout(std::time::Duration::from_secs(35), dispatcher).await {
+                Ok(Ok(Ok(()))) => info!("分流器已优雅退出"),
+                Ok(Ok(Err(e))) => error!(error = %e, "分流器退出时报错"),
+                Ok(Err(e)) => error!(error = %e, "分流器任务 join 失败"),
+                Err(_) => warn!("分流器优雅退出超时（35s），强制结束"),
             }
         }
     }
