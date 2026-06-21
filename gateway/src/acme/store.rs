@@ -339,10 +339,10 @@ fn write_atomic(path: &Path, data: &[u8], mode: u32) -> anyhow::Result<()> {
 
     // fsync 父目录，确保目录条目持久化（断电后不丢文件）。
     #[cfg(unix)]
-    if let Some(parent) = path.parent() {
-        if let Ok(dir) = std::fs::File::open(parent) {
-            let _ = dir.sync_all();
-        }
+    if let Some(parent) = path.parent()
+        && let Ok(dir) = std::fs::File::open(parent)
+    {
+        let _ = dir.sync_all();
     }
 
     Ok(())

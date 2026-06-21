@@ -89,7 +89,9 @@ pub async fn run(cfg: Arc<Config>, cancel: CancellationToken) -> anyhow::Result<
                         debug!(peer = %peer, error = %e, "连接处理结束");
                     }
                     // 连接结束：通知 drain 逻辑
-                    conn_tracker.acquire().await.ok().map(|p| p.forget());
+                    if let Ok(p) = conn_tracker.acquire().await {
+                        p.forget();
+                    }
                 });
             }
         }

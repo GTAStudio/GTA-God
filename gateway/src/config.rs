@@ -11,7 +11,6 @@ use serde::Deserialize;
 
 /// 顶层配置。
 #[derive(Debug, Clone, Deserialize)]
-#[serde(from = "RawConfig")]
 pub struct Config {
     /// L4 监听地址，例如 `0.0.0.0:443`。
     pub listen: String,
@@ -27,13 +26,18 @@ pub struct Config {
     /// 最大并发连接数（0 表示不限制）。
     #[serde(default = "default_max_connections")]
     pub max_connections: usize,
-    /// 预计算的 SNI → 上游 O(1) 查找表（key = lowercased + trimmed trailing dot）。
-    pub routes_map: HashMap<String, String>,
+    /// 精确 SNI 路由表（来自 JSON）。
+    #[serde(default)]
+    pub routes: Vec<Route>,
     /// 未命中任何路由时的默认上游。
     pub default_upstream: String,
     /// ACME 自动签发/续期配置。
     #[serde(default)]
     pub acme: Option<AcmeConfig>,
+    /// 预计算的 SNI → 上游 O(1) 查找表（key = lowercased + trimmed trailing dot）。
+    /// 由 `load()` 在加载后构建，不参与反序列化。
+    #[serde(skip)]
+    routes_map: HashMap<String, String>,
 }
 
 /// 单条 SNI → 上游映射。
@@ -79,7 +83,7 @@ impl Config {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let raw = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("读取配置文件 {} 失败: {e}", path.display()))?;
-        let cfg: Config = serde_json::from_str(&raw)
+        let mut cfg: Config = serde_json::from_str(&raw)
             .map_err(|e| anyhow::anyhow!("解析配置文件 {} 失败: {e}", path.display()))?;
 
         // 配置校验：防止误配导致 OOM 或全面瘫痪
@@ -99,19 +103,26 @@ impl Config {
             anyhow::bail!("upstream_connect_timeout_secs 不能为 0");
         }
 
+        // 预计算 O(1) 路由查找表（key = lowercased + trimmed trailing dot）。
+        cfg.routes_map = cfg
+            .routes
+            .iter()
+            .map(|r| {
+                let key = r.sni.trim_end_matches('.').to_ascii_lowercase();
+                (key, r.upstream.clone())
+            })
+            .collect();
+
         Ok(cfg)
     }
 
-    /// 按 SNI 精确匹配上游，未命中返回默认上游。
-    /// 自动 normalize trailing dot 以兑容 FQDN 形式配置。
+    /// O(1) SNI 查找，未命中返回默认上游。
+    /// 自动 normalize trailing dot 以兼容 FQDN 形式配置。
     pub fn upstream_for(&self, sni: Option<&str>) -> &str {
         if let Some(name) = sni {
-            let name = name.trim_end_matches('.');
-            for route in &self.routes {
-                let route_sni = route.sni.trim_end_matches('.');
-                if route_sni.eq_ignore_ascii_case(name) {
-                    return &route.upstream;
-                }
+            let key = name.trim_end_matches('.').to_ascii_lowercase();
+            if let Some(upstream) = self.routes_map.get(&key) {
+                return upstream;
             }
         }
         &self.default_upstream
