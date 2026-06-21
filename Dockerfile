@@ -111,10 +111,10 @@ RUN gtagate --version && \
 # `docker run --rm --entrypoint cat <image> /opt/gtagod/templates/<name>` 提取，
 # 从而免去在服务器单独上传这些模板文件
 COPY --chmod=644 \
-    singbox-config.naive.example \
-    singbox-config.anytls-combo.example \
-    singbox-config.anyreality-combo.example \
-    singbox-config.l4.example \
+    gtacore-config.naive.example \
+    gtacore-config.anytls-combo.example \
+    gtacore-config.anyreality-combo.example \
+    gtacore-config.l4.example \
     gtagod.conf.example \
     /opt/gtagod/templates/
 
