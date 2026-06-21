@@ -23,11 +23,15 @@
 ARG RUST_VERSION=1.96
 ARG ALPINE_VERSION=3.23
 ARG DEBIAN_VERSION=13-slim
+# 基镜像 digest 钉死（供应链：防上游 re-tag 静默替换；更新 tag 时须同步更新 digest）。
+# 取值：docker buildx imagetools inspect rust:1.96-alpine / debian:13-slim
+ARG RUST_DIGEST=sha256:f87aa870663e2b57ec8c69de82c7eedf7383bee987eef7612c0359635eaadb41
+ARG DEBIAN_DIGEST=sha256:4e401d95de7083948053197a9c3913343cd06b706bf15eb6a0c3ccd26f436a0e
 
 # =========================================
 # 构建阶段 1 - gtagate (Rust L4 网关 + ACME)
 # =========================================
-FROM rust:${RUST_VERSION}-alpine AS rust-builder
+FROM rust:${RUST_VERSION}-alpine@${RUST_DIGEST} AS rust-builder
 
 # aws-lc-rs (rustls/instant-acme 默认后端) 需要 C 工具链 + cmake + perl
 RUN apk add --no-cache musl-dev cmake make gcc g++ perl pkgconfig
@@ -47,7 +51,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # 运行阶段 - debian 13-slim (glibc 2.41)
 # gtacore 为 glibc 二进制；debian glibc 在代理高并发/加解密负载下吞吞优于 musl。
 # gtagate 为 musl 静态二进制，可在 glibc 系统直接运行。
-FROM debian:${DEBIAN_VERSION}
+FROM debian:${DEBIAN_VERSION}@${DEBIAN_DIGEST}
 
 # 元数据
 LABEL maintainer="gtagod" \
@@ -88,14 +92,23 @@ RUN groupadd -g 65532 gtagate && \
 # 复制 gtagate (musl 静态, 来自构建阶段) 与 gtacore (本地预构建 glibc 二进制)
 COPY --from=rust-builder --chmod=755 /usr/local/bin/gtagate /usr/bin/gtagate
 COPY --chmod=755 bin/gtacore /usr/bin/gtacore
+# gtacore 期望哈希钉进 Dockerfile（构建配方=更强信任锚；攻击者须同时改二进制+本 ARG+.sha256 文件）。
+# 更新 bin/gtacore 时须同步更新此值与 bin/gtacore.sha256。
+ARG GTACORE_SHA256=5d2df20c47336f6cb1bf029980a3ce250dba6787c09569cf46358c96d7a46f62
 COPY bin/gtacore.sha256 /tmp/gtacore.sha256
 RUN set -e; \
-    EXPECTED=$(awk '{print $1}' /tmp/gtacore.sha256); \
     ACTUAL=$(sha256sum /usr/bin/gtacore | awk '{print $1}'); \
-    if [ "$EXPECTED" != "$ACTUAL" ]; then \
-        echo "FATAL: gtacore integrity check failed!"; \
-        echo "  expected: $EXPECTED"; \
-        echo "  actual:   $ACTUAL"; \
+    FILEHASH=$(awk '{print $1}' /tmp/gtacore.sha256); \
+    if [ "$GTACORE_SHA256" != "$ACTUAL" ]; then \
+        echo "FATAL: gtacore hash != Dockerfile ARG GTACORE_SHA256"; \
+        echo "  arg:    $GTACORE_SHA256"; \
+        echo "  actual: $ACTUAL"; \
+        exit 1; \
+    fi; \
+    if [ "$FILEHASH" != "$ACTUAL" ]; then \
+        echo "FATAL: gtacore hash != bin/gtacore.sha256"; \
+        echo "  file:   $FILEHASH"; \
+        echo "  actual: $ACTUAL"; \
         exit 1; \
     fi; \
     rm -f /tmp/gtacore.sha256
