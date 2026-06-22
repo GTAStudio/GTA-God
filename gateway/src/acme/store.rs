@@ -302,12 +302,10 @@ fn normalize_dns_name(name: &str) -> String {
 /// 写临时文件后 rename，避免读取到半截内容；并设置 Unix 权限。
 /// 使用 OpenOptions + mode 原子创建，消除 write→chmod 之间的 TOCTOU 窗口。
 /// fsync 确保断电后数据持久性（不丢证书/私钥）。
-fn write_atomic(path: &Path, data: &[u8], mode: u32) -> anyhow::Result<()> {
+/// 供本模块与 acme::mod（账户凭据落盘）复用。
+pub(crate) fn write_atomic(path: &Path, data: &[u8], mode: u32) -> anyhow::Result<()> {
     // 使用带 mode 后缀的 tmp 名，避免 .crt 和 .key 共享同一 .tmp 路径
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("dat");
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("dat");
     let tmp = path.with_extension(format!("{ext}.tmp"));
 
     #[cfg(unix)]

@@ -20,6 +20,7 @@ use time::{
     format_description::well_known::{Rfc2822, Rfc3339},
     macros::format_description,
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::config::AcmeConfig;
@@ -52,7 +53,8 @@ const DNS_JSON_RESOLVERS: [&str; 2] = [
 ];
 
 /// 启动 ACME 后台任务：先做一轮签发，然后周期性检查续期。
-pub async fn run(acme: AcmeConfig) {
+/// `cancel` 触发后尽快退出（在退避/续期等待期间可被即时打断），避免残留在途 DNS-01 TXT。
+pub async fn run(acme: AcmeConfig, cancel: CancellationToken) {
     if !acme.enabled {
         info!("ACME 未启用，跳过证书管理");
         return;
@@ -61,13 +63,21 @@ pub async fn run(acme: AcmeConfig) {
     let acme = Arc::new(acme);
     let mut backoff = IssueBackoff::new();
     loop {
-        let next_interval = match reconcile(&acme).await {
+        if cancel.is_cancelled() {
+            info!("ACME 收到取消信号，退出证书管理任务");
+            return;
+        }
+        let next_interval = match reconcile(&acme, &cancel).await {
             Ok(ReconcileOutcome::Done) => {
                 backoff.reset();
                 RENEW_CHECK_INTERVAL
             }
             Ok(ReconcileOutcome::LockBusy) => LOCK_BUSY_RETRY_INTERVAL,
             Err(e) => {
+                if cancel.is_cancelled() {
+                    info!("ACME 收到取消信号，退出证书管理任务");
+                    return;
+                }
                 let retry_after = retry_after_delay_from_error(&e, OffsetDateTime::now_utc());
                 let retry_source = if retry_after.is_some() {
                     "ca_retry_after"
@@ -84,7 +94,13 @@ pub async fn run(acme: AcmeConfig) {
                 retry_interval
             }
         };
-        tokio::time::sleep(next_interval).await;
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                info!("ACME 收到取消信号，退出证书管理任务");
+                return;
+            }
+            _ = tokio::time::sleep(next_interval) => {}
+        }
     }
 }
 
@@ -404,7 +420,10 @@ fn duration_until(target: OffsetDateTime, now: OffsetDateTime) -> Option<Duratio
 }
 
 /// 遍历所有域名，对缺失或临近到期的证书执行签发。
-async fn reconcile(acme: &AcmeConfig) -> anyhow::Result<ReconcileOutcome> {
+async fn reconcile(
+    acme: &AcmeConfig,
+    cancel: &CancellationToken,
+) -> anyhow::Result<ReconcileOutcome> {
     let store = CertStore::new(&acme.cert_dir, acme.ca_label());
 
     let mut pending = pending_domains(acme, &store, true);
@@ -435,8 +454,12 @@ async fn reconcile(acme: &AcmeConfig) -> anyhow::Result<ReconcileOutcome> {
 
     let mut failures = Vec::new();
     for domain in pending {
+        if cancel.is_cancelled() {
+            warn!("收到取消信号，停止处理剩余待签发域名");
+            break;
+        }
         info!(domain = %domain, "开始签发/续期证书");
-        match issue(acme, &cf, &account, &store, domain).await {
+        match issue(acme, &cf, &account, &store, domain, cancel).await {
             Ok(()) => info!(domain = %domain, "证书已签发并落盘"),
             Err(e) => {
                 error!(domain = %domain, error = %e, "证书签发失败");
@@ -508,19 +531,10 @@ fn save_account_credentials(path: &Path, credentials: &AccountCredentials) -> an
 
     let data = serde_json::to_vec_pretty(credentials)
         .map_err(|e| anyhow::anyhow!("序列化 ACME 账户凭据失败: {e}"))?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, data)
-        .map_err(|e| anyhow::anyhow!("写入 ACME 账户临时文件 {} 失败: {e}", tmp.display()))?;
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| anyhow::anyhow!("设置 {} 权限失败: {e}", tmp.display()))?;
-    }
-
-    std::fs::rename(&tmp, path)
-        .map_err(|e| anyhow::anyhow!("保存 ACME 账户凭据 {} 失败: {e}", path.display()))?;
+    // 与 store.rs 一致的原子写：OpenOptions.mode(0o600) 原子创建（消除 write→chmod 的 0644 窗口）
+    // + sync_all + 父目录 fsync（断电不丢账户凭据，避免重新注册触发 CA new-account 限流）。
+    store::write_atomic(path, &data, 0o600)?;
     Ok(())
 }
 
@@ -537,6 +551,7 @@ async fn issue(
     account: &Account,
     store: &CertStore,
     domain: &str,
+    cancel: &CancellationToken,
 ) -> anyhow::Result<()> {
     let identifiers = [Identifier::Dns(domain.to_string())];
     let mut order = account
@@ -547,7 +562,8 @@ async fn issue(
     // 待清理的 TXT 记录 (zone_id, record_id)。
     let mut cleanups: Vec<(String, String)> = Vec::new();
 
-    let result = complete_dns01_order(acme, cf, store, domain, &mut order, &mut cleanups).await;
+    let result =
+        complete_dns01_order(acme, cf, store, domain, &mut order, &mut cleanups, cancel).await;
 
     // 无论成功与否，清理 TXT 记录。
     for (zone_id, record_id) in &cleanups {
@@ -566,6 +582,7 @@ async fn complete_dns01_order(
     domain: &str,
     order: &mut Order,
     cleanups: &mut Vec<(String, String)>,
+    cancel: &CancellationToken,
 ) -> anyhow::Result<()> {
     // 用块作用域限定 authorizations 对 order 的借用，结束后才能 &mut order 续签。
     {
@@ -595,6 +612,7 @@ async fn complete_dns01_order(
                 &record_name,
                 &dns_value,
                 Duration::from_secs(acme.dns_propagation_secs),
+                cancel,
             )
             .await?;
             challenge
@@ -607,7 +625,12 @@ async fn complete_dns01_order(
     finalize_and_store(order, store, domain).await
 }
 
-async fn wait_for_dns_txt(name: &str, expected: &str, max_wait: Duration) -> anyhow::Result<()> {
+async fn wait_for_dns_txt(
+    name: &str,
+    expected: &str,
+    max_wait: Duration,
+    cancel: &CancellationToken,
+) -> anyhow::Result<()> {
     let http = HttpClient::builder()
         .user_agent("gtagate/0.1")
         .timeout(DNS_QUERY_TIMEOUT)
@@ -626,7 +649,12 @@ async fn wait_for_dns_txt(name: &str, expected: &str, max_wait: Duration) -> any
             anyhow::bail!("等待 DNS-01 TXT 记录传播超时: {name}");
         }
 
-        tokio::time::sleep(DNS_PROPAGATION_POLL_INTERVAL.min(deadline - now)).await;
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                anyhow::bail!("等待 DNS-01 TXT 期间收到取消信号，提前返回以触发 TXT 清理: {name}");
+            }
+            _ = tokio::time::sleep(DNS_PROPAGATION_POLL_INTERVAL.min(deadline - now)) => {}
+        }
     }
 }
 

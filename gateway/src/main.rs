@@ -49,17 +49,21 @@ async fn main() -> anyhow::Result<()> {
     let cfg = Arc::new(config::Config::load(&config_path)?);
     info!(config = %config_path.display(), "gtagate 启动");
 
+    // 优雅退出令牌：dispatcher 与 ACME 任务共用，收到信号时一并取消。
+    let cancel = CancellationToken::new();
+
     // 后台启动 ACME 任务（不阻塞分流器；分流器为 TLS passthrough，无需等待证书）。
-    if let Some(acme_cfg) = cfg.acme.clone() {
+    // 保留 JoinHandle，退出时给在途 DNS-01 清理一点时间，避免残留 _acme-challenge TXT。
+    let acme_task = cfg.acme.clone().map(|acme_cfg| {
+        let cancel = cancel.clone();
         tokio::spawn(async move {
-            acme::run(acme_cfg).await;
-        });
-    } else {
+            acme::run(acme_cfg, cancel).await;
+        })
+    });
+    if acme_task.is_none() {
         info!("未配置 ACME，仅运行 L4 分流");
     }
 
-    // 优雅退出：使用 CancellationToken 通知分流器停止 accept 并 drain 活跃连接。
-    let cancel = CancellationToken::new();
     let mut dispatcher = {
         let cfg = Arc::clone(&cfg);
         let cancel = cancel.clone();
@@ -83,12 +87,16 @@ async fn main() -> anyhow::Result<()> {
         _ = shutdown_signal() => {
             info!("收到退出信号，gtagate 正在优雅关闭");
             cancel.cancel();
-            // 等待分流器把活跃连接 drain 完（其内部 30s drain 超时会先触发，此处 35s 为兜底上限）。
-            match tokio::time::timeout(std::time::Duration::from_secs(35), dispatcher).await {
+            // 等待分流器 drain（内部 5s drain 超时先触发，此处 6s 兜底）；总停机预算需 < entrypoint 8s 看门狗 < Docker 10s grace。
+            match tokio::time::timeout(std::time::Duration::from_secs(6), dispatcher).await {
                 Ok(Ok(Ok(()))) => info!("分流器已优雅退出"),
                 Ok(Ok(Err(e))) => error!(error = %e, "分流器退出时报错"),
                 Ok(Err(e)) => error!(error = %e, "分流器任务 join 失败"),
-                Err(_) => warn!("分流器优雅退出超时（35s），强制结束"),
+                Err(_) => warn!("分流器优雅退出超时（6s），强制结束"),
+            }
+            // 给 ACME 任务一点时间响应取消并完成在途 DNS-01 TXT 清理（停机预算紧，仅 1s 尽力而为）。
+            if let Some(handle) = acme_task {
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
             }
         }
     }

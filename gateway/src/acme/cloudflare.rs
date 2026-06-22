@@ -16,6 +16,8 @@ impl Cloudflare {
     pub fn new(token: String) -> anyhow::Result<Self> {
         let http = Client::builder()
             .user_agent("gtagate/0.1")
+            .timeout(std::time::Duration::from_secs(15))
+            .connect_timeout(std::time::Duration::from_secs(5))
             .build()
             .map_err(|e| anyhow::anyhow!("构建 HTTP 客户端失败: {e}"))?;
         Ok(Self { token, http })

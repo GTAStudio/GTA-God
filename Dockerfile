@@ -53,10 +53,15 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # gtagate 为 musl 静态二进制，可在 glibc 系统直接运行。
 FROM debian:${DEBIAN_VERSION}@${DEBIAN_DIGEST}
 
-# 元数据
+# 元数据：镜像语义版本=所打包的 gtacore 版本（单一 source of truth）。
+# CI 从 bin/gtacore 读出真版本并经 --build-arg GTAGOD_VERSION 注入；本地构建用默认值。
+# 更新 bin/gtacore 时须同步此默认值（与 bin/gtacore.sha256、ARG GTACORE_SHA256 一起）。
+ARG GTAGOD_VERSION=0.1.10
 LABEL maintainer="gtagod" \
-    description="GTAGod - GTACore (Rust, naive + anytls + anyreality) with gtagate L4" \
-    version="0.0.1"
+    org.opencontainers.image.title="gtagod" \
+    org.opencontainers.image.description="GTAGod - GTACore (Rust, naive + anytls + anyreality) + gtagate L4" \
+    org.opencontainers.image.version="${GTAGOD_VERSION}" \
+    org.opencontainers.image.licenses="MIT"
 
 # 一次性安装所有依赖并创建目录，减少镜像层
 # procps 提供 pgrep/ps：healthcheck.sh 与 run.sh 的存活检测统一用 `pgrep -x gtagate/gtacore`，

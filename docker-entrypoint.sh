@@ -252,7 +252,7 @@ trap cleanup TERM INT QUIT
 echo "🚀 Starting gtagate..."
 gtagate "$GTAGATE_CONFIG" &
 GATE_PID=$!
-sleep 2
+isleep 2
 if ! kill -0 "$GATE_PID" 2>/dev/null; then
     echo "❌ gtagate failed to start (exited within 2s)"
     echo "   ↑ 若上方日志为「绑定监听地址 0.0.0.0:443 失败: Permission denied」："
@@ -300,7 +300,7 @@ stop_singbox() {
         kill -TERM "$SINGBOX_PID" 2>/dev/null
         _stop_timeout=10
         while [ $_stop_timeout -gt 0 ] && kill -0 "$SINGBOX_PID" 2>/dev/null; do
-            sleep 1
+            isleep 1
             _stop_timeout=$((_stop_timeout - 1))
         done
         if kill -0 "$SINGBOX_PID" 2>/dev/null; then
@@ -320,7 +320,7 @@ reload_singbox() {
     fi
 
     stop_singbox
-    sleep 1
+    isleep 1
     start_singbox
 
     if [ -n "$SINGBOX_PID" ] && kill -0 "$SINGBOX_PID" 2>/dev/null; then
@@ -376,7 +376,7 @@ start_singbox() {
     SINGBOX_PID=$!
     echo "✅ gtacore started with PID: $SINGBOX_PID"
 
-    sleep 3
+    isleep 3
     if kill -0 "$SINGBOX_PID" 2>/dev/null; then
         SINGBOX_RESTART_ATTEMPTS=0
         touch /tmp/gtagod-singbox-started
@@ -411,10 +411,18 @@ if [ "$NEEDS_CERT" = "true" ]; then
     
     # 提取域名信息 (使用 jq 精确解析)
     DOMAIN=$(jq -r '[.inbounds[]? | .tls?.server_name // empty] | first // empty' "$SINGBOX_RUNTIME_CONFIG" 2>/dev/null)
-    ROOT_DOMAIN=$(echo "$DOMAIN" | awk -F. '{if(NF>=2) print $(NF-1)"."$NF; else print $0}')
+    # 优先用 gtagate 配置里 ACME 申请的权威域名（去掉通配前缀 *.）作为证书根域名，
+    # 避免用 awk -F. 取末两段在多级 TLD（如 foo.co.uk → 误得 co.uk）上猜错。
+    ROOT_DOMAIN=$(jq -r '.acme.domains[0]? // empty' "$GTAGATE_CONFIG" 2>/dev/null | sed 's/^\*\.//')
+    if [ -z "$ROOT_DOMAIN" ]; then
+        ROOT_DOMAIN=$(echo "$DOMAIN" | awk -F. '{if(NF>=2) print $(NF-1)"."$NF; else print $0}')
+    fi
     if [ -z "$ROOT_DOMAIN" ]; then
         ROOT_DOMAIN="example.com"
     fi
+    # 转义域名中的 . 用于 grep BRE（避免 example.com 的 . 误匹配任意字符如 exampleXcom）
+    ROOT_DOMAIN_RE=$(printf '%s' "$ROOT_DOMAIN" | sed 's/\./\\./g')
+    DOMAIN_RE=$(printf '%s' "$DOMAIN" | sed 's/\./\\./g')
     echo "📋 Domain: $DOMAIN (root: $ROOT_DOMAIN)"
 
     # 证书查找函数 - 单次 find 遍历，按优先级匹配
@@ -425,21 +433,21 @@ if [ "$NEEDS_CERT" = "true" ]; then
         [ -z "$cert_list" ] && return 1
 
         # 策略1: 通配符证书 wildcard_*.domain.com (最常见)
-        cert=$(echo "$cert_list" | grep "/wildcard_.*\.${ROOT_DOMAIN}/" | head -1)
+        cert=$(echo "$cert_list" | grep "/wildcard_.*\.${ROOT_DOMAIN_RE}/" | head -1)
         if [ -n "$cert" ] && [ -f "$cert" ]; then echo "$cert"; return 0; fi
 
         # 策略2: 完整域名证书 subdomain.domain.com
         if [ -n "$DOMAIN" ]; then
-            cert=$(echo "$cert_list" | grep "/${DOMAIN}/" | head -1)
+            cert=$(echo "$cert_list" | grep "/${DOMAIN_RE}/" | head -1)
             if [ -n "$cert" ] && [ -f "$cert" ]; then echo "$cert"; return 0; fi
         fi
 
         # 策略3: 根域名证书 domain.com
-        cert=$(echo "$cert_list" | grep "/${ROOT_DOMAIN}/" | head -1)
+        cert=$(echo "$cert_list" | grep "/${ROOT_DOMAIN_RE}/" | head -1)
         if [ -n "$cert" ] && [ -f "$cert" ]; then echo "$cert"; return 0; fi
 
         # 策略4: 任意包含根域名的证书
-        cert=$(echo "$cert_list" | grep -i "${ROOT_DOMAIN}" | head -1)
+        cert=$(echo "$cert_list" | grep -i "${ROOT_DOMAIN_RE}" | head -1)
         if [ -n "$cert" ] && [ -f "$cert" ]; then echo "$cert"; return 0; fi
 
         return 1
@@ -507,7 +515,7 @@ if [ "$NEEDS_CERT" = "true" ]; then
             fi
             isleep 3
             WAIT_COUNT=$((WAIT_COUNT + 3))
-            if [ $((WAIT_COUNT % 3)) -lt 3 ] && [ $((WAIT_COUNT / 15 * 15)) -eq $WAIT_COUNT ]; then
+            if [ $(( (WAIT_COUNT - 10) % 15 )) -eq 0 ]; then
                 echo "⏳ Waiting for certificate... (${WAIT_COUNT}s/${MAX_WAIT}s)"
                 ls -la /data/caddy/certificates/ 2>/dev/null || echo "   Directory not ready"
             fi
@@ -630,7 +638,7 @@ while true; do
                 else
                     echo "⚠️  Hot reload failed, falling back to restart..."
                     stop_singbox
-                    sleep 2
+                    isleep 2
                     start_singbox
                     if [ -n "$SINGBOX_PID" ] && kill -0 "$SINGBOX_PID" 2>/dev/null; then
                         echo "✅ sing-box restarted with new certificate"

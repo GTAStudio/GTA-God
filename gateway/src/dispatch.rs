@@ -29,7 +29,8 @@ const MAX_CLIENT_HELLO: usize = 16 * 1024;
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 
 /// 优雅关闭时等待活跃连接完成的最大时长。
-const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+/// 容器内停机预算受限（entrypoint 8s 看门狗 + Docker 10s grace），故取 5s 让 gtagate 在被 SIGKILL 前干净退出。
+const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// 设置 TCP Keepalive：60s 后开始探测，每 15s 一次。检测死连接，避免资源泄漏。
 fn set_tcp_keepalive(stream: &TcpStream) {

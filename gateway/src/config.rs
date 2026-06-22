@@ -26,7 +26,8 @@ pub struct Config {
     /// 最大并发连接数（0 表示不限制）。
     #[serde(default = "default_max_connections")]
     pub max_connections: usize,
-    /// 精确 SNI 路由表（来自 JSON）。
+    /// SNI 路由表（来自 JSON）。`sni` 支持精确主机名，或 `*.example.com`
+    /// 形式的通配（恰好匹配一层子域名，与泛域名证书语义一致）。
     #[serde(default)]
     pub routes: Vec<Route>,
     /// 未命中任何路由时的默认上游。
@@ -34,16 +35,21 @@ pub struct Config {
     /// ACME 自动签发/续期配置。
     #[serde(default)]
     pub acme: Option<AcmeConfig>,
-    /// 预计算的 SNI → 上游 O(1) 查找表（key = lowercased + trimmed trailing dot）。
+    /// 预计算的精确 SNI → 上游 O(1) 查找表（key = lowercased + trimmed trailing dot）。
     /// 由 `load()` 在加载后构建，不参与反序列化。
     #[serde(skip)]
     routes_map: HashMap<String, String>,
+    /// 预计算的通配路由：`(base, 上游)`，base 为去掉 `*.` 前缀后的根域
+    /// （如 `example.com`）。仅匹配恰好一层子域名。由 `load()` 构建。
+    #[serde(skip)]
+    wildcard_routes: Vec<(String, String)>,
 }
 
 /// 单条 SNI → 上游映射。
 #[derive(Debug, Clone, Deserialize)]
 pub struct Route {
-    /// 精确匹配的 SNI 主机名。
+    /// 匹配的 SNI 主机名：精确（`api.example.com`）或通配（`*.example.com`，
+    /// 恰好匹配一层子域名）。精确匹配优先于通配。
     pub sni: String,
     /// 命中后转发到的上游地址，例如 `127.0.0.1:8445`。
     pub upstream: String,
@@ -103,26 +109,49 @@ impl Config {
             anyhow::bail!("upstream_connect_timeout_secs 不能为 0");
         }
 
-        // 预计算 O(1) 路由查找表（key = lowercased + trimmed trailing dot）。
-        cfg.routes_map = cfg
-            .routes
-            .iter()
-            .map(|r| {
-                let key = r.sni.trim_end_matches('.').to_ascii_lowercase();
-                (key, r.upstream.clone())
-            })
-            .collect();
+        // 预计算路由查找表（精确 + 通配）。
+        cfg.build_route_indices();
 
         Ok(cfg)
     }
 
-    /// O(1) SNI 查找，未命中返回默认上游。
-    /// 自动 normalize trailing dot 以兼容 FQDN 形式配置。
+    /// 构建精确/通配路由索引。精确路由进 O(1) HashMap；`*.domain` 通配路由
+    /// 单列，匹配时按"恰好一层子域名"语义（与泛域名证书一致）。
+    fn build_route_indices(&mut self) {
+        let mut routes_map: HashMap<String, String> = HashMap::new();
+        let mut wildcard_routes: Vec<(String, String)> = Vec::new();
+        for r in &self.routes {
+            let key = r.sni.trim_end_matches('.').to_ascii_lowercase();
+            match key.strip_prefix("*.") {
+                // 通配路由 `*.example.com` → base = `example.com`。
+                Some(base) if !base.is_empty() => {
+                    wildcard_routes.push((base.to_string(), r.upstream.clone()));
+                }
+                _ => {
+                    routes_map.insert(key, r.upstream.clone());
+                }
+            }
+        }
+        self.routes_map = routes_map;
+        self.wildcard_routes = wildcard_routes;
+    }
+
+    /// SNI 查找：精确路由（O(1)）优先，其次通配路由（恰好一层子域名），
+    /// 最后回退默认上游。自动 normalize trailing dot 以兼容 FQDN 形式配置。
     pub fn upstream_for(&self, sni: Option<&str>) -> &str {
         if let Some(name) = sni {
             let key = name.trim_end_matches('.').to_ascii_lowercase();
+            // 1) 精确匹配优先。
             if let Some(upstream) = self.routes_map.get(&key) {
                 return upstream;
+            }
+            // 2) 通配匹配：`*.example.com` 仅匹配恰好一层子域名，与泛域名证书
+            //    语义一致；可正确拒绝 `evilexample.com`、`a.b.example.com`、
+            //    apex `example.com` 等越界/多层情形 → 落到默认上游。
+            for (base, upstream) in &self.wildcard_routes {
+                if wildcard_label_matches(base, &key) {
+                    return upstream;
+                }
             }
         }
         &self.default_upstream
@@ -218,4 +247,102 @@ fn default_renew_days() -> i64 {
 
 fn default_propagation() -> u64 {
     60
+}
+
+/// 判断 `key` 是否为 `base` 的恰好一层子域名（通配路由匹配）。
+/// 例如 base=`example.com`：`foo.example.com` ✓；`a.b.example.com`/`example.com`/
+/// `evilexample.com`（无点边界）✗。与 `acme::store::dns_name_matches` 的泛域名
+/// 证书匹配语义保持一致。入参 `key` 应已 normalize（lowercase + 去尾点）。
+fn wildcard_label_matches(base: &str, key: &str) -> bool {
+    match key.strip_suffix(base) {
+        // label 必须以 '.' 结尾（点边界）且其余部分不含 '.'（恰好一层）。
+        // `ends_with('.')` 保证 label 非空，故 `label.len() - 1` 不会下溢。
+        Some(label) => label.ends_with('.') && !label[..label.len() - 1].contains('.'),
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 复用 `build_route_indices` 的预计算逻辑（跳过 `load()` 的文件 I/O 与
+    /// 阈值校验，仅验证路由匹配）。`#[serde(skip)]` 字段反序列化为默认空值。
+    fn load_str(json: &str) -> Config {
+        let mut cfg: Config = match serde_json::from_str(json) {
+            Ok(c) => c,
+            Err(e) => panic!("测试配置 JSON 非法: {e}"),
+        };
+        cfg.build_route_indices();
+        cfg
+    }
+
+    const COMBO: &str = r#"{
+        "listen": "0.0.0.0:443",
+        "default_upstream": "127.0.0.1:8444",
+        "routes": [
+            { "sni": "api.example.com", "upstream": "127.0.0.1:8445" },
+            { "sni": "www.amazon.com", "upstream": "127.0.0.1:8444" },
+            { "sni": "*.example.com", "upstream": "127.0.0.1:8443" }
+        ]
+    }"#;
+
+    #[test]
+    fn exact_route_takes_priority_over_wildcard() {
+        let cfg = load_str(COMBO);
+        // api.example.com 同时匹配精确(anytls)与通配(*.example.com→naive)，精确优先。
+        assert_eq!(cfg.upstream_for(Some("api.example.com")), "127.0.0.1:8445");
+    }
+
+    #[test]
+    fn wildcard_matches_single_label_subdomain() {
+        let cfg = load_str(COMBO);
+        // naive 客户端的"任意 *.domain 子域名" → 通配 → naive(8443)。
+        for s in [
+            "proxy.example.com",
+            "www.example.com",
+            "abc.example.com",
+            "PROXY.Example.COM",
+        ] {
+            assert_eq!(cfg.upstream_for(Some(s)), "127.0.0.1:8443", "{s}");
+        }
+    }
+
+    #[test]
+    fn probes_fall_through_to_default_decoy() {
+        let cfg = load_str(COMBO);
+        // 无 SNI / apex / 多层 / 越界相似 / 后缀伪装 / 随机 → 默认上游(=decoy 8444)。
+        assert_eq!(cfg.upstream_for(None), "127.0.0.1:8444");
+        for s in [
+            "example.com",              // apex 不匹配 *.example.com
+            "a.b.example.com",          // 多层子域名
+            "evilexample.com",          // 越界相似（无点边界）
+            "example.com.attacker.net", // 后缀伪装
+            "scanner-probe.invalid",    // 随机探测
+        ] {
+            assert_eq!(cfg.upstream_for(Some(s)), "127.0.0.1:8444", "{s}");
+        }
+    }
+
+    #[test]
+    fn wildcard_matching_is_case_and_trailing_dot_insensitive() {
+        let cfg = load_str(COMBO);
+        assert_eq!(cfg.upstream_for(Some("Proxy.Example.Com.")), "127.0.0.1:8443");
+        assert_eq!(cfg.upstream_for(Some("API.EXAMPLE.COM.")), "127.0.0.1:8445");
+    }
+
+    #[test]
+    fn exact_only_config_unaffected_by_wildcard_logic() {
+        // 无通配路由时行为与旧版一致（回归保护）。
+        let cfg = load_str(
+            r#"{
+            "listen": "0.0.0.0:443",
+            "default_upstream": "127.0.0.1:8443",
+            "routes": [ { "sni": "api.example.com", "upstream": "127.0.0.1:8445" } ]
+        }"#,
+        );
+        assert_eq!(cfg.upstream_for(Some("api.example.com")), "127.0.0.1:8445");
+        assert_eq!(cfg.upstream_for(Some("other.example.com")), "127.0.0.1:8443");
+        assert_eq!(cfg.upstream_for(None), "127.0.0.1:8443");
+    }
 }
