@@ -1,9 +1,9 @@
 #!/bin/sh
 
-CONFIG_PATH="/tmp/sing-box-config.json"
+CONFIG_PATH="/tmp/gtacore-config.json"
 
 if [ ! -f "$CONFIG_PATH" ]; then
-    CONFIG_PATH="/etc/sing-box/config.json"
+    CONFIG_PATH="/etc/gtacore/config.json"
 fi
 
 # gtagate must always be running
@@ -21,7 +21,7 @@ elif [ -r /proc/net/tcp ] || [ -r /proc/net/tcp6 ]; then
         || { echo "healthcheck: no LISTEN socket on :443" >&2; exit 1; }
 fi
 
-if [ -f /tmp/gtagod-singbox-required ]; then
+if [ -f /tmp/gtagod-gtacore-required ]; then
     pgrep -x gtacore >/dev/null 2>&1 || { echo "healthcheck: gtacore required but not running" >&2; exit 1; }
 fi
 

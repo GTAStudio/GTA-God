@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use socket2::SockRef;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpSocket, TcpStream};
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
@@ -43,9 +43,29 @@ fn set_tcp_keepalive(stream: &TcpStream) {
 
 /// 启动分流器主循环。接收 CancellationToken 以支持优雅退出。
 pub async fn run(cfg: Arc<Config>, cancel: CancellationToken) -> anyhow::Result<()> {
-    let listener = TcpListener::bind(&cfg.listen)
-        .await
+    // SO_REUSEADDR：容器以 --net=host 重启/重建时，旧进程在该端口的连接可能仍处于
+    // TIME_WAIT 并残留于宿主网络命名空间；不设置则新进程 bind 会因 EADDRINUSE
+    // ("Address already in use") 失败。设置后可立即重新绑定。这是服务端标准实践，
+    // 不影响安全（仅放宽 TIME_WAIT 同地址重绑，未启用 SO_REUSEPORT 多进程共享）。
+    let addr: std::net::SocketAddr = cfg
+        .listen
+        .parse()
+        .map_err(|e| anyhow::anyhow!("解析监听地址 {} 失败（需 IP:端口）: {e}", cfg.listen))?;
+    let socket = if addr.is_ipv4() {
+        TcpSocket::new_v4()
+    } else {
+        TcpSocket::new_v6()
+    }
+    .map_err(|e| anyhow::anyhow!("创建监听 socket 失败: {e}"))?;
+    socket
+        .set_reuseaddr(true)
+        .map_err(|e| anyhow::anyhow!("设置 SO_REUSEADDR 失败: {e}"))?;
+    socket
+        .bind(addr)
         .map_err(|e| anyhow::anyhow!("绑定监听地址 {} 失败: {e}", cfg.listen))?;
+    let listener = socket
+        .listen(1024)
+        .map_err(|e| anyhow::anyhow!("监听 {} 失败: {e}", cfg.listen))?;
     info!(listen = %cfg.listen, max_connections = cfg.max_connections, "L4 SNI 分流器已启动");
 
     // 并发连接上限：0 表示不限制；否则用信号量背压，抵御资源耗尽型攻击。

@@ -10,7 +10,7 @@
 # 
 # GTACore (Rust) 统一架构:
 #   - gtagate (Rust): L4 SNI 分流 + ACME 证书申请
-#   - gtacore (Rust): naive + anytls + anyreality (替代 sing-box)
+#   - gtacore (Rust): naive + anytls + anyreality (替代 gtacore)
 #
 # 支持的部署模式:
 #   - NaiveProxy Only (gtacore naive inbound)
@@ -21,9 +21,9 @@
 # =========================================
 
 VERSION="0.0.1"
-SINGBOX_MOUNTED_CONFIG="/etc/sing-box/config.json"
-SINGBOX_RUNTIME_CONFIG="/tmp/sing-box-config.json"
-SINGBOX_LOG_FILE="/var/log/sing-box/sing-box.log"
+GTACORE_MOUNTED_CONFIG="/etc/gtacore/config.json"
+GTACORE_RUNTIME_CONFIG="/tmp/gtacore-config.json"
+GTACORE_LOG_FILE="/var/log/gtacore/gtacore.log"
 GTAGATE_CONFIG="/etc/gtagate/config.json"
 
 echo "========================================="
@@ -61,47 +61,47 @@ fi
 rm -f /tmp/gtagate-validate.log
 
 # =========================================
-# 检查 sing-box 配置
+# 检查 gtacore 配置
 # =========================================
-if [ ! -f "$SINGBOX_MOUNTED_CONFIG" ]; then
-    echo "❌ ERROR: $SINGBOX_MOUNTED_CONFIG not found!"
-    echo "Please mount your sing-box config to $SINGBOX_MOUNTED_CONFIG"
+if [ ! -f "$GTACORE_MOUNTED_CONFIG" ]; then
+    echo "❌ ERROR: $GTACORE_MOUNTED_CONFIG not found!"
+    echo "Please mount your gtacore config to $GTACORE_MOUNTED_CONFIG"
     exit 1
 fi
 
-echo "📝 sing-box config found"
+echo "📝 gtacore config found"
 
 # 复制到可写运行时配置。entrypoint 后续会执行兼容性迁移、IPv4 策略修正、证书路径更新，
 # 因此不能直接修改只读挂载配置。若挂载配置不可读，必须在启动早期明确失败。
-if ! cat "$SINGBOX_MOUNTED_CONFIG" > "$SINGBOX_RUNTIME_CONFIG"; then
-    echo "❌ ERROR: Cannot read $SINGBOX_MOUNTED_CONFIG or write $SINGBOX_RUNTIME_CONFIG"
-    echo "Please check host permissions. Recommended: chown 65532:65532 singbox/config.json && chmod 640 (未 chown 时用 0644)"
-    ls -ld /etc/sing-box "$SINGBOX_MOUNTED_CONFIG" /tmp 2>/dev/null || true
+if ! cat "$GTACORE_MOUNTED_CONFIG" > "$GTACORE_RUNTIME_CONFIG"; then
+    echo "❌ ERROR: Cannot read $GTACORE_MOUNTED_CONFIG or write $GTACORE_RUNTIME_CONFIG"
+    echo "Please check host permissions. Recommended: chown 65532:65532 gtacore/config.json && chmod 640 (未 chown 时用 0644)"
+    ls -ld /etc/gtacore "$GTACORE_MOUNTED_CONFIG" /tmp 2>/dev/null || true
     exit 1
 fi
 
-if ! chmod 0600 "$SINGBOX_RUNTIME_CONFIG"; then
-    echo "❌ ERROR: Failed to set permissions on $SINGBOX_RUNTIME_CONFIG"
+if ! chmod 0600 "$GTACORE_RUNTIME_CONFIG"; then
+    echo "❌ ERROR: Failed to set permissions on $GTACORE_RUNTIME_CONFIG"
     exit 1
 fi
 
-if ! jq empty "$SINGBOX_RUNTIME_CONFIG" >/tmp/sing-box-json-validate.log 2>&1; then
-    echo "❌ ERROR: $SINGBOX_MOUNTED_CONFIG is not valid JSON"
-    cat /tmp/sing-box-json-validate.log
-    rm -f /tmp/sing-box-json-validate.log
+if ! jq empty "$GTACORE_RUNTIME_CONFIG" >/tmp/gtacore-json-validate.log 2>&1; then
+    echo "❌ ERROR: $GTACORE_MOUNTED_CONFIG is not valid JSON"
+    cat /tmp/gtacore-json-validate.log
+    rm -f /tmp/gtacore-json-validate.log
     exit 1
 fi
-rm -f /tmp/sing-box-json-validate.log
+rm -f /tmp/gtacore-json-validate.log
 
-echo "✅ Runtime sing-box config prepared at $SINGBOX_RUNTIME_CONFIG"
+echo "✅ Runtime gtacore config prepared at $GTACORE_RUNTIME_CONFIG"
 
 migrate_legacy_dns_servers() {
-    if ! jq -e 'any(.dns.servers[]?; (.address? != null) and (.address | type == "string"))' "$SINGBOX_RUNTIME_CONFIG" >/dev/null 2>&1; then
-        echo "✅ sing-box DNS server format is current"
+    if ! jq -e 'any(.dns.servers[]?; (.address? != null) and (.address | type == "string"))' "$GTACORE_RUNTIME_CONFIG" >/dev/null 2>&1; then
+        echo "✅ gtacore DNS server format is current"
         return 0
     fi
 
-    echo "⚠️  Detected legacy sing-box DNS server format, migrating to typed HTTPS servers..."
+    echo "⚠️  Detected legacy gtacore DNS server format, migrating to typed HTTPS servers..."
 
     if ! jq '
         def migrate_dns_server:
@@ -116,27 +116,27 @@ migrate_legacy_dns_servers() {
             .
           end;
         .dns.servers |= map(migrate_dns_server)
-    ' "$SINGBOX_RUNTIME_CONFIG" > "${SINGBOX_RUNTIME_CONFIG}.migrated"; then
+    ' "$GTACORE_RUNTIME_CONFIG" > "${GTACORE_RUNTIME_CONFIG}.migrated"; then
         echo "❌ Failed to migrate legacy DNS server format"
-        rm -f "${SINGBOX_RUNTIME_CONFIG}.migrated"
+        rm -f "${GTACORE_RUNTIME_CONFIG}.migrated"
         return 1
     fi
 
-    if jq -e 'any(.dns.servers[]?; .address? != null)' "${SINGBOX_RUNTIME_CONFIG}.migrated" >/dev/null 2>&1; then
+    if jq -e 'any(.dns.servers[]?; .address? != null)' "${GTACORE_RUNTIME_CONFIG}.migrated" >/dev/null 2>&1; then
         echo "❌ Found unsupported legacy DNS server entries after migration"
-        rm -f "${SINGBOX_RUNTIME_CONFIG}.migrated"
+        rm -f "${GTACORE_RUNTIME_CONFIG}.migrated"
         return 1
     fi
 
-    if ! mv "${SINGBOX_RUNTIME_CONFIG}.migrated" "$SINGBOX_RUNTIME_CONFIG"; then
-        echo "❌ Failed to replace sing-box config after DNS migration"
-        rm -f "${SINGBOX_RUNTIME_CONFIG}.migrated"
+    if ! mv "${GTACORE_RUNTIME_CONFIG}.migrated" "$GTACORE_RUNTIME_CONFIG"; then
+        echo "❌ Failed to replace gtacore config after DNS migration"
+        rm -f "${GTACORE_RUNTIME_CONFIG}.migrated"
         return 1
     fi
 
-    chmod 0600 "$SINGBOX_RUNTIME_CONFIG" 2>/dev/null || true
+    chmod 0600 "$GTACORE_RUNTIME_CONFIG" 2>/dev/null || true
 
-    echo "✅ Legacy sing-box DNS servers migrated to typed HTTPS format"
+    echo "✅ Legacy gtacore DNS servers migrated to typed HTTPS format"
     return 0
 }
 
@@ -149,24 +149,24 @@ enforce_ipv4_only_without_ipv6() {
         return 0
     fi
 
-    if ! jq -e 'has("dns")' "$SINGBOX_RUNTIME_CONFIG" >/dev/null 2>&1; then
+    if ! jq -e 'has("dns")' "$GTACORE_RUNTIME_CONFIG" >/dev/null 2>&1; then
         return 0
     fi
 
-    _dns_strategy=$(jq -r '.dns.strategy // "unset"' "$SINGBOX_RUNTIME_CONFIG" 2>/dev/null)
+    _dns_strategy=$(jq -r '.dns.strategy // "unset"' "$GTACORE_RUNTIME_CONFIG" 2>/dev/null)
     if [ "$_dns_strategy" = "ipv4_only" ]; then
         echo "ℹ️  未检测到全局 IPv6，DNS strategy 已是 ipv4_only"
         return 0
     fi
 
     echo "⚠️  未检测到全局 IPv6 地址，将 DNS strategy 由 ${_dns_strategy} 强制为 ipv4_only（避免直连不可达的 IPv6）"
-    if jq '.dns.strategy = "ipv4_only"' "$SINGBOX_RUNTIME_CONFIG" > "${SINGBOX_RUNTIME_CONFIG}.ipv4" \
-        && mv "${SINGBOX_RUNTIME_CONFIG}.ipv4" "$SINGBOX_RUNTIME_CONFIG"; then
-        chmod 0600 "$SINGBOX_RUNTIME_CONFIG" 2>/dev/null || true
+    if jq '.dns.strategy = "ipv4_only"' "$GTACORE_RUNTIME_CONFIG" > "${GTACORE_RUNTIME_CONFIG}.ipv4" \
+        && mv "${GTACORE_RUNTIME_CONFIG}.ipv4" "$GTACORE_RUNTIME_CONFIG"; then
+        chmod 0600 "$GTACORE_RUNTIME_CONFIG" 2>/dev/null || true
         echo "✅ DNS strategy 已设为 ipv4_only"
     else
         echo "⚠️  设置 ipv4_only 失败，继续使用 ${_dns_strategy}"
-        rm -f "${SINGBOX_RUNTIME_CONFIG}.ipv4"
+        rm -f "${GTACORE_RUNTIME_CONFIG}.ipv4"
     fi
 }
 
@@ -184,31 +184,31 @@ HAS_ANYTLS=false
 HAS_ANYREALITY=false
 NEEDS_CERT=false
 
-if jq -e '.inbounds[]? | select(.type == "naive")' "$SINGBOX_RUNTIME_CONFIG" >/dev/null 2>&1; then
+if jq -e '.inbounds[]? | select(.type == "naive")' "$GTACORE_RUNTIME_CONFIG" >/dev/null 2>&1; then
     HAS_NAIVE=true
     echo "✅ Detected NaiveProxy inbound"
 fi
 
-if jq -e '.inbounds[]? | select(.type == "anytls")' "$SINGBOX_RUNTIME_CONFIG" >/dev/null 2>&1; then
+if jq -e '.inbounds[]? | select(.type == "anytls")' "$GTACORE_RUNTIME_CONFIG" >/dev/null 2>&1; then
     HAS_ANYTLS=true
     echo "✅ Detected AnyTLS inbound"
 fi
 
-if jq -e '.inbounds[]? | select(.tls?.reality?.enabled == true and .tls?.reality?.private_key != null)' "$SINGBOX_RUNTIME_CONFIG" >/dev/null 2>&1; then
+if jq -e '.inbounds[]? | select(.tls?.reality?.enabled == true and .tls?.reality?.private_key != null)' "$GTACORE_RUNTIME_CONFIG" >/dev/null 2>&1; then
     HAS_ANYREALITY=true
     echo "✅ Detected AnyReality inbound"
 fi
 
 # 检测是否需要证书 (naive 和非 reality 的 anytls 都需要证书)
-if jq -e '.inbounds[]? | select(.tls?.certificate_path != null)' "$SINGBOX_RUNTIME_CONFIG" >/dev/null 2>&1; then
+if jq -e '.inbounds[]? | select(.tls?.certificate_path != null)' "$GTACORE_RUNTIME_CONFIG" >/dev/null 2>&1; then
     NEEDS_CERT=true
     echo "📋 Certificate required for TLS inbounds"
 fi
 
 if [ "$HAS_NAIVE" = "true" ] || [ "$HAS_ANYTLS" = "true" ] || [ "$HAS_ANYREALITY" = "true" ]; then
-    touch /tmp/gtagod-singbox-required
+    touch /tmp/gtagod-gtacore-required
 else
-    rm -f /tmp/gtagod-singbox-required
+    rm -f /tmp/gtagod-gtacore-required
 fi
 
 # =========================================
@@ -221,7 +221,7 @@ isleep() { sleep "$1" & wait $!; }
 cleanup() {
     echo "🛑 Received stop signal, shutting down gracefully..."
     # Send SIGTERM to all managed processes
-    for _pid_var in SINGBOX_PID GATE_PID LOG_TAIL_PID; do
+    for _pid_var in GTACORE_PID GATE_PID LOG_TAIL_PID; do
         eval "_pid=\$$_pid_var"
         if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null; then
             echo "🛑 Stopping $_pid_var (PID $_pid)..."
@@ -229,11 +229,11 @@ cleanup() {
         fi
     done
     # 8s 看门狗：留 Docker 10s grace period 2s 余量，超时强杀
-    ( sleep 8; for _v in SINGBOX_PID GATE_PID LOG_TAIL_PID; do
+    ( sleep 8; for _v in GTACORE_PID GATE_PID LOG_TAIL_PID; do
         eval "_p=\$$_v"; [ -n "$_p" ] && kill -9 "$_p" 2>/dev/null
     done ) & _wd_pid=$!
     # 用 wait 真正回收子进程（避免 kill -0 轮询僵尸永远成立的 bug）
-    for _pid_var in SINGBOX_PID GATE_PID LOG_TAIL_PID; do
+    for _pid_var in GTACORE_PID GATE_PID LOG_TAIL_PID; do
         eval "_pid=\$$_pid_var"
         [ -n "$_pid" ] && wait "$_pid" 2>/dev/null
     done
@@ -265,13 +265,13 @@ fi
 echo "✅ gtagate started with PID: $GATE_PID"
 
 # =========================================
-# 等待证书后启动 sing-box
+# 等待证书后启动 gtacore
 # =========================================
 CERT_WAIT_MAX="${CERT_WAIT_MAX:-180}"
 CERT_RETRY_INTERVAL="${CERT_RETRY_INTERVAL:-30}"
 CERT_RETRY_MAX="${CERT_RETRY_MAX:-10}"
-SINGBOX_RESTART_ATTEMPTS=0
-SINGBOX_MAX_RESTART_ATTEMPTS=10
+GTACORE_RESTART_ATTEMPTS=0
+GTACORE_MAX_RESTART_ATTEMPTS=10
 GTACORE_TOKEN_FILE="${GTACORE_TOKEN_FILE:-/tmp/gtacore-token}"
 
 # gtacore 控制面 (127.0.0.1:19810) 需要 token；仅 loopback，容器不暴露该端口
@@ -283,47 +283,47 @@ ensure_gtacore_token() {
     chmod 600 "$GTACORE_TOKEN_FILE"
 }
 
-ensure_singbox_log_forwarder() {
-    mkdir -p /var/log/sing-box
-    touch "$SINGBOX_LOG_FILE"
+ensure_gtacore_log_forwarder() {
+    mkdir -p /var/log/gtacore
+    touch "$GTACORE_LOG_FILE"
 
     if [ -n "$LOG_TAIL_PID" ] && kill -0 "$LOG_TAIL_PID" 2>/dev/null; then
         return 0
     fi
 
-    tail -n 0 -f "$SINGBOX_LOG_FILE" &
+    tail -n 0 -f "$GTACORE_LOG_FILE" &
     LOG_TAIL_PID=$!
 }
 
-stop_singbox() {
-    if [ -n "$SINGBOX_PID" ] && kill -0 "$SINGBOX_PID" 2>/dev/null; then
-        kill -TERM "$SINGBOX_PID" 2>/dev/null
+stop_gtacore() {
+    if [ -n "$GTACORE_PID" ] && kill -0 "$GTACORE_PID" 2>/dev/null; then
+        kill -TERM "$GTACORE_PID" 2>/dev/null
         _stop_timeout=10
-        while [ $_stop_timeout -gt 0 ] && kill -0 "$SINGBOX_PID" 2>/dev/null; do
+        while [ $_stop_timeout -gt 0 ] && kill -0 "$GTACORE_PID" 2>/dev/null; do
             isleep 1
             _stop_timeout=$((_stop_timeout - 1))
         done
-        if kill -0 "$SINGBOX_PID" 2>/dev/null; then
-            echo "⚠️  gtacore did not stop within 10s, force killing PID $SINGBOX_PID..."
-            kill -9 "$SINGBOX_PID" 2>/dev/null
+        if kill -0 "$GTACORE_PID" 2>/dev/null; then
+            echo "⚠️  gtacore did not stop within 10s, force killing PID $GTACORE_PID..."
+            kill -9 "$GTACORE_PID" 2>/dev/null
         fi
-        wait "$SINGBOX_PID" 2>/dev/null || true
+        wait "$GTACORE_PID" 2>/dev/null || true
     fi
-    SINGBOX_PID=""
+    GTACORE_PID=""
 }
 
-reload_singbox() {
+reload_gtacore() {
     # gtacore 无 SIGHUP 热重载，证书更新需重启进程
-    if ! validate_singbox_config; then
+    if ! validate_gtacore_config; then
         echo "❌ Skipping gtacore reload because config validation failed"
         return 1
     fi
 
-    stop_singbox
+    stop_gtacore
     isleep 1
-    start_singbox
+    start_gtacore
 
-    if [ -n "$SINGBOX_PID" ] && kill -0 "$SINGBOX_PID" 2>/dev/null; then
+    if [ -n "$GTACORE_PID" ] && kill -0 "$GTACORE_PID" 2>/dev/null; then
         echo "✅ gtacore reloaded (restarted) successfully"
         return 0
     fi
@@ -332,10 +332,10 @@ reload_singbox() {
     return 1
 }
 
-validate_singbox_config() {
-    VALIDATE_LOG="/tmp/sing-box-check.log"
+validate_gtacore_config() {
+    VALIDATE_LOG="/tmp/gtacore-check.log"
 
-    if gtacore sing-box check -c "$SINGBOX_RUNTIME_CONFIG" >"$VALIDATE_LOG" 2>&1; then
+    if gtacore sing-box check -c "$GTACORE_RUNTIME_CONFIG" >"$VALIDATE_LOG" 2>&1; then
         echo "✅ gtacore config validation passed"
         rm -f "$VALIDATE_LOG"
         return 0
@@ -347,7 +347,7 @@ validate_singbox_config() {
     return 1
 }
 
-get_singbox_restart_delay() {
+get_gtacore_restart_delay() {
     case "$1" in
         1) echo 2 ;;
         2) echo 5 ;;
@@ -357,30 +357,61 @@ get_singbox_restart_delay() {
     esac
 }
 
-start_singbox() {
-    if [ -n "$SINGBOX_PID" ] && kill -0 "$SINGBOX_PID" 2>/dev/null; then
+# 等待 gtacore 监听端口空闲再启动。根因：--net=host 下旧进程在监听端口的
+# TIME_WAIT 连接残留于宿主网络命名空间；若 gtacore 未设 SO_REUSEADDR，新进程 bind
+# 会 "Address already in use"，短退避(2s)连撞会耗尽重启配额 → --restart=always 死循环。
+# 容器内无 ss/iproute2，故解析 /proc/net/tcp{,6}（local_address 端口为 4 位大写十六进制）。
+# 有界等待（最多 ~75s ≈ TIME_WAIT 60s + 余量）；超时仍启动交由退避重试兑底。
+wait_for_ports_free() {
+    local ports procfiles waited p hex busy
+    ports=$(jq -r '.inbounds[]?.listen_port // empty' "$GTACORE_RUNTIME_CONFIG" 2>/dev/null | sort -u)
+    [ -z "$ports" ] && return 0
+    procfiles="/proc/net/tcp"
+    [ -r /proc/net/tcp6 ] && procfiles="$procfiles /proc/net/tcp6"
+    waited=0
+    while [ "$waited" -lt 75 ]; do
+        busy=""
+        for p in $ports; do
+            hex=$(printf '%04X' "$p" 2>/dev/null) || continue
+            if awk -v pat=":${hex}\$" '$2 ~ pat {f=1} END{exit !f}' $procfiles 2>/dev/null; then
+                busy="${busy} ${p}"
+            fi
+        done
+        [ -z "$busy" ] && return 0
+        echo "⏳ 等待监听端口释放(TIME_WAIT 残留):${busy} ... (${waited}/75s)"
+        isleep 5
+        waited=$((waited + 5))
+    done
+    echo "⚠️  端口在 75s 后仍未完全释放，仍尝试启动 gtacore（可能 EADDRINUSE，将按退避重试）"
+    return 0
+}
+
+start_gtacore() {
+    if [ -n "$GTACORE_PID" ] && kill -0 "$GTACORE_PID" 2>/dev/null; then
         return 0
     fi
 
     echo ""
     echo "🚀 Starting gtacore..."
 
-    if ! validate_singbox_config; then
+    if ! validate_gtacore_config; then
         echo "❌ Fatal: gtacore config is invalid or unreadable; exiting instead of running a degraded container"
         exit 1
     fi
 
     ensure_gtacore_token
-    ensure_singbox_log_forwarder
-    gtacore run --config "$SINGBOX_RUNTIME_CONFIG" --token-file "$GTACORE_TOKEN_FILE" >> "$SINGBOX_LOG_FILE" 2>&1 &
-    SINGBOX_PID=$!
-    echo "✅ gtacore started with PID: $SINGBOX_PID"
+    ensure_gtacore_log_forwarder
+    # --net=host 重建/重启竞态：启动前等监听端口的 TIME_WAIT 残留释放，避免 EADDRINUSE。
+    wait_for_ports_free
+    gtacore run --config "$GTACORE_RUNTIME_CONFIG" --token-file "$GTACORE_TOKEN_FILE" >> "$GTACORE_LOG_FILE" 2>&1 &
+    GTACORE_PID=$!
+    echo "✅ gtacore started with PID: $GTACORE_PID"
 
     isleep 3
-    if kill -0 "$SINGBOX_PID" 2>/dev/null; then
-        SINGBOX_RESTART_ATTEMPTS=0
-        touch /tmp/gtagod-singbox-started
-        echo "✅ sing-box is running successfully!"
+    if kill -0 "$GTACORE_PID" 2>/dev/null; then
+        GTACORE_RESTART_ATTEMPTS=0
+        touch /tmp/gtagod-gtacore-started
+        echo "✅ gtacore is running successfully!"
         
         # 显示启用的功能
         if [ "$HAS_NAIVE" = "true" ]; then
@@ -393,11 +424,11 @@ start_singbox() {
             echo "   📦 AnyReality: enabled"
         fi
     else
-        echo "❌ sing-box failed to start! Logs:"
-        tail -30 "$SINGBOX_LOG_FILE" 2>/dev/null || echo "No log file"
-        stop_singbox
+        echo "❌ gtacore failed to start! Logs:"
+        tail -30 "$GTACORE_LOG_FILE" 2>/dev/null || echo "No log file"
+        stop_gtacore
         echo ""
-        if [ -f /tmp/gtagod-singbox-required ]; then
+        if [ -f /tmp/gtagod-gtacore-required ]; then
             echo "❌ Fatal: gtacore is required for configured inbounds; exiting instead of running a degraded container"
             exit 1
         fi
@@ -410,7 +441,7 @@ if [ "$NEEDS_CERT" = "true" ]; then
     echo "🔍 Waiting for SSL certificates..."
     
     # 提取域名信息 (使用 jq 精确解析)
-    DOMAIN=$(jq -r '[.inbounds[]? | .tls?.server_name // empty] | first // empty' "$SINGBOX_RUNTIME_CONFIG" 2>/dev/null)
+    DOMAIN=$(jq -r '[.inbounds[]? | .tls?.server_name // empty] | first // empty' "$GTACORE_RUNTIME_CONFIG" 2>/dev/null)
     # 优先用 gtagate 配置里 ACME 申请的权威域名（去掉通配前缀 *.）作为证书根域名，
     # 避免用 awk -F. 取末两段在多级 TLD（如 foo.co.uk → 误得 co.uk）上猜错。
     ROOT_DOMAIN=$(jq -r '.acme.domains[0]? // empty' "$GTAGATE_CONFIG" 2>/dev/null | sed 's/^\*\.//')
@@ -454,19 +485,19 @@ if [ "$NEEDS_CERT" = "true" ]; then
     }
 
     update_cert_paths() {
-        echo "🔧 Updating sing-box config with certificate paths..."
+        echo "🔧 Updating gtacore config with certificate paths..."
         if ! jq --arg cert "$ACTUAL_CERT" --arg key "$ACTUAL_KEY" \
             '(.inbounds[] | select(.tls?.certificate_path != null) | .tls) |= (.certificate_path = $cert | .key_path = $key)' \
-            "$SINGBOX_RUNTIME_CONFIG" > "${SINGBOX_RUNTIME_CONFIG}.tmp"; then
+            "$GTACORE_RUNTIME_CONFIG" > "${GTACORE_RUNTIME_CONFIG}.tmp"; then
             echo "❌ Failed to update certificate paths with jq"
-            rm -f "${SINGBOX_RUNTIME_CONFIG}.tmp"
+            rm -f "${GTACORE_RUNTIME_CONFIG}.tmp"
             return 1
         fi
-        if ! mv "${SINGBOX_RUNTIME_CONFIG}.tmp" "$SINGBOX_RUNTIME_CONFIG"; then
-            echo "❌ Failed to replace sing-box config after cert path update"
+        if ! mv "${GTACORE_RUNTIME_CONFIG}.tmp" "$GTACORE_RUNTIME_CONFIG"; then
+            echo "❌ Failed to replace gtacore config after cert path update"
             return 1
         fi
-        chmod 0600 "$SINGBOX_RUNTIME_CONFIG" 2>/dev/null || true
+        chmod 0600 "$GTACORE_RUNTIME_CONFIG" 2>/dev/null || true
         echo "✅ Certificate paths updated: $ACTUAL_CERT"
     }
     
@@ -527,7 +558,7 @@ if [ "$NEEDS_CERT" = "true" ]; then
             echo "❌ Fatal: failed to update certificate paths"
             exit 1
         fi
-        start_singbox
+        start_gtacore
     else
         echo "⚠️  Timeout waiting for certificate after ${MAX_WAIT}s"
         echo "🔁 Auto-retry is enabled (interval: ${CERT_RETRY_INTERVAL}s, max: ${CERT_RETRY_MAX})"
@@ -558,7 +589,7 @@ if [ "$NEEDS_CERT" = "true" ]; then
                         echo "❌ Fatal: failed to update certificate paths"
                         exit 1
                     fi
-                    start_singbox
+                    start_gtacore
                     break
                 fi
             fi
@@ -569,26 +600,26 @@ if [ "$NEEDS_CERT" = "true" ]; then
         done
     fi
 else
-    start_singbox
+    start_gtacore
 fi
 
 echo ""
 echo "========================================="
 echo "✅ GTAGod Container v${VERSION} initialized"
 echo "📊 gtagate PID: $GATE_PID"
-if [ -n "$SINGBOX_PID" ] && kill -0 "$SINGBOX_PID" 2>/dev/null; then
-    echo "📊 gtacore PID: $SINGBOX_PID"
+if [ -n "$GTACORE_PID" ] && kill -0 "$GTACORE_PID" 2>/dev/null; then
+    echo "📊 gtacore PID: $GTACORE_PID"
 fi
 echo "========================================="
 
-# 保持容器运行，同时监控 gtagate 和 sing-box
+# 保持容器运行，同时监控 gtagate 和 gtacore
 # =========================================
 # 进程监控 + 证书自动重载
 # =========================================
 # 每 10 秒检查一次:
 #   1. gtagate 是否存活
-#   2. sing-box 是否存活（如果应该运行的话）
-#   3. 证书文件是否更新（自动重载 sing-box）
+#   2. gtacore 是否存活（如果应该运行的话）
+#   3. 证书文件是否更新（自动重载 gtacore）
 # =========================================
 
 CERT_MTIME=""
@@ -604,46 +635,46 @@ while true; do
         exit 1
     fi
 
-    # 检查 sing-box 是否存活（如果之前成功启动过）
-    if [ -n "$SINGBOX_PID" ] && ! kill -0 "$SINGBOX_PID" 2>/dev/null; then
-        SINGBOX_RESTART_ATTEMPTS=$((SINGBOX_RESTART_ATTEMPTS + 1))
-        if [ "$SINGBOX_RESTART_ATTEMPTS" -gt "$SINGBOX_MAX_RESTART_ATTEMPTS" ]; then
-            echo "❌ sing-box exceeded max restart attempts ($SINGBOX_MAX_RESTART_ATTEMPTS), exiting container..."
+    # 检查 gtacore 是否存活（如果之前成功启动过）
+    if [ -n "$GTACORE_PID" ] && ! kill -0 "$GTACORE_PID" 2>/dev/null; then
+        GTACORE_RESTART_ATTEMPTS=$((GTACORE_RESTART_ATTEMPTS + 1))
+        if [ "$GTACORE_RESTART_ATTEMPTS" -gt "$GTACORE_MAX_RESTART_ATTEMPTS" ]; then
+            echo "❌ gtacore exceeded max restart attempts ($GTACORE_MAX_RESTART_ATTEMPTS), exiting container..."
             exit 1
         fi
-        RESTART_DELAY=$(get_singbox_restart_delay "$SINGBOX_RESTART_ATTEMPTS")
-        echo "⚠️  sing-box (PID $SINGBOX_PID) has exited, attempting restart #${SINGBOX_RESTART_ATTEMPTS}/${SINGBOX_MAX_RESTART_ATTEMPTS} after ${RESTART_DELAY}s..."
+        RESTART_DELAY=$(get_gtacore_restart_delay "$GTACORE_RESTART_ATTEMPTS")
+        echo "⚠️  gtacore (PID $GTACORE_PID) has exited, attempting restart #${GTACORE_RESTART_ATTEMPTS}/${GTACORE_MAX_RESTART_ATTEMPTS} after ${RESTART_DELAY}s..."
         isleep "$RESTART_DELAY"
-        start_singbox
-        if [ -n "$SINGBOX_PID" ] && kill -0 "$SINGBOX_PID" 2>/dev/null; then
-            echo "✅ sing-box restarted successfully (PID $SINGBOX_PID)"
+        start_gtacore
+        if [ -n "$GTACORE_PID" ] && kill -0 "$GTACORE_PID" 2>/dev/null; then
+            echo "✅ gtacore restarted successfully (PID $GTACORE_PID)"
         else
-            echo "❌ sing-box restart failed, will continue with backoff"
+            echo "❌ gtacore restart failed, will continue with backoff"
         fi
     fi
 
-    # 检查证书是否更新（自动重载 sing-box）
+    # 检查证书是否更新（自动重载 gtacore）
     if [ "$NEEDS_CERT" = "true" ] && [ -n "$ACTUAL_CERT" ] && [ -f "$ACTUAL_CERT" ]; then
         NEW_MTIME=$(stat -c %Y "$ACTUAL_CERT" 2>/dev/null || stat -f %m "$ACTUAL_CERT" 2>/dev/null || echo "")
         if [ -n "$NEW_MTIME" ] && [ -n "$CERT_MTIME" ] && [ "$NEW_MTIME" != "$CERT_MTIME" ]; then
-            echo "🔄 Certificate updated, reloading sing-box..."
+            echo "🔄 Certificate updated, reloading gtacore..."
             CERT_MTIME="$NEW_MTIME"
             if ! update_cert_paths; then
                 echo "❌ Failed to update certificate paths after cert change; skipping reload"
                 continue
             fi
-            if [ -n "$SINGBOX_PID" ] && kill -0 "$SINGBOX_PID" 2>/dev/null; then
-                if reload_singbox; then
-                    echo "✅ sing-box reloaded with new certificate"
+            if [ -n "$GTACORE_PID" ] && kill -0 "$GTACORE_PID" 2>/dev/null; then
+                if reload_gtacore; then
+                    echo "✅ gtacore reloaded with new certificate"
                 else
                     echo "⚠️  Hot reload failed, falling back to restart..."
-                    stop_singbox
+                    stop_gtacore
                     isleep 2
-                    start_singbox
-                    if [ -n "$SINGBOX_PID" ] && kill -0 "$SINGBOX_PID" 2>/dev/null; then
-                        echo "✅ sing-box restarted with new certificate"
+                    start_gtacore
+                    if [ -n "$GTACORE_PID" ] && kill -0 "$GTACORE_PID" 2>/dev/null; then
+                        echo "✅ gtacore restarted with new certificate"
                     else
-                        echo "❌ sing-box restart failed"
+                        echo "❌ gtacore restart failed"
                     fi
                 fi
             fi

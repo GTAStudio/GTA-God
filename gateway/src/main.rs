@@ -1,7 +1,7 @@
 //! gtagate — GTA-God 的 L4 SNI 分流 + ACME(Cloudflare DNS-01) 网关。
 //!
 //! 纯 Rust 替代 Caddy 在本项目承担的两项职责：
-//!   1. 监听 443，按 TLS SNI 透传分流到 sing-box 的各 inbound 本地端口；
+//!   1. 监听 443，按 TLS SNI 透传分流到 gtacore 的各 inbound 本地端口；
 //!   2. 通过 Cloudflare DNS-01 自动签发/续期泛域名证书并落盘。
 
 mod acme;

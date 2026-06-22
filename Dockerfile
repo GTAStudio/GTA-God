@@ -5,12 +5,12 @@
 # 更新: 2026-06-04
 # =========================================
 #
-# 此版本用 GTACore (Rust, sing-box 兼容) 完全替代 sing-box，
+# 此版本用 GTACore (Rust, gtacore 兼容) 完全替代 gtacore，
 # 原生处理 naive + anytls + anyreality（anyreality 所需 uTLS sidecar 已内嵌）。
 #
 # 架构 (v0.0.1):
 #   - gtagate (Rust): L4 SNI 分流 + ACME 证书申请 (替代 Caddy)
-#   - gtacore (Rust): naive + anytls + anyreality (替代 sing-box)
+#   - gtacore (Rust): naive + anytls + anyreality (替代 gtacore)
 #
 # 依赖版本 (2026-06-04 更新):
 #   - Rust: 1.96 (edition 2024，需要 rustc >= 1.85)
@@ -85,14 +85,14 @@ RUN apt-get update && \
         /data/caddy \
         /var/log/caddy \
         /etc/gtagate \
-        /etc/sing-box \
-        /var/log/sing-box
+        /etc/gtacore \
+        /var/log/gtacore
 
 # 创建非 root 用户（固定 UID/GID 65532，便于宿主机 bind-mount 目录精确 chown，
 # 避免用 chmod 777 放开世界可写）。配合 setcap 和 --cap-add=NET_BIND_SERVICE 实现最小权限。
 RUN groupadd -g 65532 gtagate && \
     useradd -u 65532 -g 65532 -M -s /usr/sbin/nologin -d /nonexistent gtagate && \
-    chown -R gtagate:gtagate /config /data /var/log/caddy /var/log/sing-box
+    chown -R gtagate:gtagate /config /data /var/log/caddy /var/log/gtacore
 
 # 复制 gtagate (musl 静态, 来自构建阶段) 与 gtacore (本地预构建 glibc 二进制)
 COPY --from=rust-builder --chmod=755 /usr/local/bin/gtagate /usr/bin/gtagate
@@ -136,7 +136,7 @@ ENV XDG_CONFIG_HOME=/config \
 EXPOSE 443
 
 # 数据卷
-VOLUME ["/config", "/data", "/var/log/caddy", "/etc/sing-box", "/var/log/sing-box"]
+VOLUME ["/config", "/data", "/var/log/caddy", "/etc/gtacore", "/var/log/gtacore"]
 
 # 工作目录
 WORKDIR /data/caddy
@@ -150,7 +150,7 @@ USER gtagate
 COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY --chmod=755 healthcheck.sh /usr/local/bin/healthcheck.sh
 
-# 健康检查 - gtagate + sing-box + 证书就绪状态
+# 健康检查 - gtagate + gtacore + 证书就绪状态
 HEALTHCHECK --interval=30s --timeout=10s --start-period=300s --start-interval=5s --retries=3 \
     CMD /usr/local/bin/healthcheck.sh
 
