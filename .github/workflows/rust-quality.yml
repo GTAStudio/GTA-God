@@ -1,0 +1,64 @@
+name: rust-quality
+
+# gtagate（gateway/）质量门禁：fmt / clippy(-D warnings) / check / test / audit / 锁文件一致性。
+# 修复 2026-06-22 审计 #5：此前 CI 只做 docker build+push，Rust 代码无任何质量门禁。
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'gateway/**'
+      - '.github/workflows/rust-quality.yml'
+  pull_request:
+    paths:
+      - 'gateway/**'
+      - '.github/workflows/rust-quality.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-quality-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: gateway
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      # 固定到与 Docker 构建一致的 Rust 1.96（edition 2024），避免本地/CI/镜像版本漂移。
+      # 注：x86_64-linux 上 aws-lc-rs(非-FIPS) 用预生成 bindings，仅需 ubuntu-latest 自带的 C 工具链，无需额外装 cmake/clang。
+      - name: Install Rust 1.96 (rustfmt + clippy)
+        run: |
+          rustup toolchain install 1.96 --profile minimal
+          rustup component add rustfmt clippy --toolchain 1.96
+          rustup default 1.96
+          rustc --version && cargo --version
+
+      - name: rustfmt (check)
+        run: cargo fmt --all --check
+
+      - name: clippy (deny warnings)
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: cargo check
+        run: cargo check --all-targets --locked
+
+      - name: cargo test
+        run: cargo test --all-targets --locked
+
+      - name: cargo audit (RUSTSEC advisories)
+        run: |
+          # 用 stable 工具链装/跑 cargo-audit，避免其 MSRV 高于钉定的 1.96 时门禁假失败（audit 只读 Cargo.lock，与工具链无关）。
+          rustup toolchain install stable --profile minimal
+          rustup run stable cargo install cargo-audit --locked
+          rustup run stable cargo audit
+
+      - name: verify Cargo.lock is up to date
+        run: cargo update --locked --dry-run
