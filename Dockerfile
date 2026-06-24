@@ -99,7 +99,7 @@ COPY --from=rust-builder --chmod=755 /usr/local/bin/gtagate /usr/bin/gtagate
 COPY --chmod=755 bin/gtacore /usr/bin/gtacore
 # gtacore 期望哈希钉进 Dockerfile（构建配方=更强信任锚；攻击者须同时改二进制+本 ARG+.sha256 文件）。
 # 更新 bin/gtacore 时须同步更新此值与 bin/gtacore.sha256。
-ARG GTACORE_SHA256=90295470e179f9ae6a6204f26cb51a1d17db328758661291a7ae8b1bb5a4a814
+ARG GTACORE_SHA256=4216ffff428d9704ed9b6b2bac6adb2b3e2061d3e06542a71a584883ba6175fc
 COPY bin/gtacore.sha256 /tmp/gtacore.sha256
 RUN set -e; \
     ACTUAL=$(sha256sum /usr/bin/gtacore | awk '{print $1}'); \
