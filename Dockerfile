@@ -56,7 +56,7 @@ FROM debian:${DEBIAN_VERSION}@${DEBIAN_DIGEST}
 # 元数据：镜像语义版本=所打包的 gtacore 版本（单一 source of truth）。
 # CI 从 bin/gtacore 读出真版本并经 --build-arg GTAGOD_VERSION 注入；本地构建用默认值。
 # 更新 bin/gtacore 时须同步此默认值（与 bin/gtacore.sha256、ARG GTACORE_SHA256 一起）。
-ARG GTAGOD_VERSION=0.1.13
+ARG GTAGOD_VERSION=0.1.14
 LABEL maintainer="gtagod" \
     org.opencontainers.image.title="gtagod" \
     org.opencontainers.image.description="GTAGod - GTACore (Rust, naive + anytls + anyreality) + gtagate L4" \
@@ -99,7 +99,7 @@ COPY --from=rust-builder --chmod=755 /usr/local/bin/gtagate /usr/bin/gtagate
 COPY --chmod=755 bin/gtacore /usr/bin/gtacore
 # gtacore 期望哈希钉进 Dockerfile（构建配方=更强信任锚；攻击者须同时改二进制+本 ARG+.sha256 文件）。
 # 更新 bin/gtacore 时须同步更新此值与 bin/gtacore.sha256。
-ARG GTACORE_SHA256=ccc4fd165db2f18fd6d32f5592a8046bfd987e3c6c1ab529859103d5809a6c67
+ARG GTACORE_SHA256=89fa8f213933624f8b528f44e0d8c249db4ee3867c32fda6de945c4fa216a942
 COPY bin/gtacore.sha256 /tmp/gtacore.sha256
 RUN set -e; \
     ACTUAL=$(sha256sum /usr/bin/gtacore | awk '{print $1}'); \
