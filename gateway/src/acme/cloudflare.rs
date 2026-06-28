@@ -50,10 +50,11 @@ impl Cloudflare {
             .send()
             .await
             .map_err(|e| anyhow::anyhow!("查询 zone {name} 失败: {e}"))?;
+        let status = resp.status();
         let body: serde_json::Value = resp
             .json()
             .await
-            .map_err(|e| anyhow::anyhow!("解析 zone 响应失败: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("解析 zone 响应失败 (HTTP {status}): {e}"))?;
         ensure_success(&body, "查询 zone")?;
         Ok(body["result"]
             .get(0)
@@ -81,10 +82,11 @@ impl Cloudflare {
             .send()
             .await
             .map_err(|e| anyhow::anyhow!("创建 TXT 记录失败: {e}"))?;
+        let status = resp.status();
         let body: serde_json::Value = resp
             .json()
             .await
-            .map_err(|e| anyhow::anyhow!("解析 TXT 创建响应失败: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("解析 TXT 创建响应失败 (HTTP {status}): {e}"))?;
         ensure_success(&body, "创建 TXT 记录")?;
         body["result"]["id"]
             .as_str()
@@ -103,10 +105,11 @@ impl Cloudflare {
             .send()
             .await
             .map_err(|e| anyhow::anyhow!("删除 TXT 记录失败: {e}"))?;
+        let status = resp.status();
         let body: serde_json::Value = resp
             .json()
             .await
-            .map_err(|e| anyhow::anyhow!("解析 TXT 删除响应失败: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("解析 TXT 删除响应失败 (HTTP {status}): {e}"))?;
         ensure_success(&body, "删除 TXT 记录")?;
         Ok(())
     }

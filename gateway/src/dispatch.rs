@@ -135,21 +135,24 @@ pub async fn run(cfg: Arc<Config>, cancel: CancellationToken) -> anyhow::Result<
     Ok(())
 }
 
-/// 读取 SNI 阶段：独立函数使 buf/chunk 在返回后自动释放，不占 copy 阶段内存。
+/// 读取 SNI 阶段：独立函数使读取缓冲在返回后自动释放，不占 copy 阶段内存。
 async fn read_sni(
     client: &mut TcpStream,
     timeout_secs: u64,
 ) -> anyhow::Result<(Option<String>, Vec<u8>)> {
+    // 直接读入 buf 的 spare capacity（read_buf，无 chunk 中转、无额外 memcpy）。
     let mut buf: Vec<u8> = Vec::with_capacity(2048);
-    let mut chunk = [0u8; 2048];
 
     let sni = timeout(Duration::from_secs(timeout_secs), async {
         loop {
-            let n = client.read(&mut chunk).await?;
+            // read_buf 不会自动扩容：容量用尽时先 reserve，确保有可写空间。
+            if buf.len() == buf.capacity() {
+                buf.reserve(2048);
+            }
+            let n = client.read_buf(&mut buf).await?;
             if n == 0 {
                 return Ok::<Option<String>, io::Error>(None);
             }
-            buf.extend_from_slice(&chunk[..n]);
             match extract_sni(&buf) {
                 SniResult::Found(host) => return Ok(Some(host)),
                 SniResult::NoSni | SniResult::Invalid => return Ok(None),
@@ -173,16 +176,17 @@ async fn handle_connection(mut client: TcpStream, cfg: Arc<Config>) -> anyhow::R
     let _ = client.set_nodelay(true);
     set_tcp_keepalive(&client);
 
-    // SNI 读取在独立函数中，返回后 chunk 栈数组自动释放。
+    // SNI 读取在独立函数中，返回后读取缓冲自动释放。
     let (sni, initial_data) = read_sni(&mut client, cfg.dispatch_timeout_secs).await?;
 
-    let upstream_addr = cfg.upstream_for(sni.as_deref()).to_string();
+    // upstream_for 返回借用自 cfg 的 &str，cfg 生命周期覆盖整个函数，省去 to_string 分配。
+    let upstream_addr = cfg.upstream_for(sni.as_deref());
     debug!(sni = ?sni, upstream = %upstream_addr, "分流决策");
 
     // 带超时的上游连接，避免挂起的上游长期占用任务与套接字。
     let mut upstream = timeout(
         Duration::from_secs(cfg.upstream_connect_timeout_secs),
-        TcpStream::connect(&upstream_addr),
+        TcpStream::connect(upstream_addr),
     )
     .await
     .map_err(|_| anyhow::anyhow!("连接上游 {upstream_addr} 超时"))?
@@ -214,31 +218,26 @@ async fn handle_connection(mut client: TcpStream, cfg: Arc<Config>) -> anyhow::R
 // Linux splice(2) 零拷贝实现
 // =========================================================================
 
-/// RAII pipe：用 `OwnedFd` 托管两端，离开作用域自动 close —— 根除"每连接泄漏 4 个 fd"的旧缺陷。
+/// RAII pipe：用标准库 `io::pipe()` 创建，两端均为自动 close 的 owned 句柄
+/// （`PipeReader`/`PipeWriter`，Drop 即关闭）—— 根除"每连接泄漏 4 个 fd"的旧缺陷，
+/// 且创建过程不再需要任何 unsafe（替代旧的 `libc::pipe2` + `OwnedFd::from_raw_fd`）。
 #[cfg(target_os = "linux")]
 struct Pipe {
-    read: std::os::fd::OwnedFd,
-    write: std::os::fd::OwnedFd,
+    read: io::PipeReader,
+    write: io::PipeWriter,
 }
 
 #[cfg(target_os = "linux")]
 impl Pipe {
-    /// 创建非阻塞 + CLOEXEC pipe，并尝试把内核缓冲扩大到 64KB。
+    /// 创建匿名管道。标准库保证两端 fd 均为 CLOEXEC，离开作用域自动关闭。
+    ///
+    /// 关于两项被移除的旧设置（行为与旧实现等价）：
+    /// - 不再手动设 `O_NONBLOCK`：本路径从不直接 read/write pipe，只经 splice 搬运，而
+    ///   splice 始终带 `SPLICE_F_NONBLOCK`，pipe 端非阻塞性由该标志保证（与 pipe fd 自身
+    ///   的 O_NONBLOCK 无关）；两个 socket 端由 tokio 设为非阻塞。
+    /// - 不再手动 `F_SETPIPE_SZ`：Linux 默认管道容量即 64KB（16 页），与旧值一致。
     fn new() -> io::Result<Self> {
-        use std::os::fd::FromRawFd;
-
-        let mut fds = [0i32; 2];
-        // SAFETY: fds 为合法的二元数组指针，pipe2 只向其写入两个描述符。
-        let ret = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_NONBLOCK | libc::O_CLOEXEC) };
-        if ret < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: pipe2 成功返回，fds[0]/fds[1] 是本进程独占的有效描述符，交由 OwnedFd 托管生命周期。
-        let read = unsafe { std::os::fd::OwnedFd::from_raw_fd(fds[0]) };
-        let write = unsafe { std::os::fd::OwnedFd::from_raw_fd(fds[1]) };
-        // 扩大 pipe buffer 到 64KB（失败不致命，多数内核默认 16 页 = 64KB）。
-        // SAFETY: fds[1] 为有效写端描述符，F_SETPIPE_SZ 不涉及指针。
-        unsafe { libc::fcntl(fds[1], libc::F_SETPIPE_SZ, 65536) };
+        let (read, write) = io::pipe()?;
         Ok(Self { read, write })
     }
 }
@@ -246,7 +245,7 @@ impl Pipe {
 /// Linux splice(2) 双向零拷贝透传。
 ///
 /// 正确性要点（修复历史三个缺陷）：
-///   1. pipe 由 `OwnedFd` 托管，连接结束自动 close —— 根除每连接 4 个 fd 的泄漏（→ EMFILE）。
+///   1. pipe 由标准库 `PipeReader`/`PipeWriter` 托管，连接结束自动 close —— 根除每连接 4 个 fd 的泄漏（→ EMFILE）。
 ///   2. 用 `TcpStream::async_io`（而非裸 `readable()` + 裸 splice）驱动系统调用 ——
 ///      WouldBlock 时 tokio 会清除 readiness 并真正挂起任务，根除 100% CPU 空转。
 ///   3. 用 `join!`（而非 `select!`）跑完两个方向，一方 EOF 时仅关闭对端写半边 ——
@@ -312,7 +311,10 @@ async fn splice_one_direction(
                 .async_io(Interest::WRITABLE, || splice_raw(pipe_r, dst_fd, remaining))
                 .await?;
             if written == 0 {
-                return Err(io::Error::new(io::ErrorKind::WriteZero, "splice 写入 0 字节"));
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "splice 写入 0 字节",
+                ));
             }
             remaining -= written;
         }
@@ -327,21 +329,28 @@ fn splice_raw(
     len: usize,
 ) -> io::Result<usize> {
     const FLAGS: libc::c_uint = (libc::SPLICE_F_MOVE | libc::SPLICE_F_NONBLOCK) as libc::c_uint;
-    // SAFETY: fd_in/fd_out 由调用方保证有效（来自存活的 TcpStream / Pipe）；
-    // 两个 offset 传 null 表示使用各自隐含偏移（socket/pipe 无 seek 偏移）。
-    let ret = unsafe {
-        libc::splice(
-            fd_in,
-            std::ptr::null_mut(),
-            fd_out,
-            std::ptr::null_mut(),
-            len,
-            FLAGS,
-        )
-    };
-    if ret < 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(ret as usize)
+    loop {
+        // SAFETY: fd_in/fd_out 由调用方保证有效（来自存活的 TcpStream / Pipe）；
+        // 两个 offset 传 null 表示使用各自隐含偏移（socket/pipe 无 seek 偏移）。
+        let ret = unsafe {
+            libc::splice(
+                fd_in,
+                std::ptr::null_mut(),
+                fd_out,
+                std::ptr::null_mut(),
+                len,
+                FLAGS,
+            )
+        };
+        if ret < 0 {
+            let err = io::Error::last_os_error();
+            // EINTR：被信号打断，就地重试（标准 syscall 处理）。其它错误（含 EAGAIN）
+            // 上抛，由 async_io 识别 WouldBlock 并挂起，绝不空转。
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
+        }
+        return Ok(ret as usize);
     }
 }

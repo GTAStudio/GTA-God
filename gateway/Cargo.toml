@@ -15,7 +15,10 @@ path = "src/main.rs"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "signal", "sync"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tls-parser = "0.12"
-instant-acme = "0.8"
+# rcgen feature 显式声明：order.finalize() 内部生成私钥+CSR 依赖它。当前虽经
+# aws-lc-rs 默认 feature 链（rcgen/aws_lc_rs）传递启用，显式声明可防未来某次
+# default-features=false 瘦身时静默丢失 rcgen 导致 finalize() 编译断裂。
+instant-acme = { version = "0.8", features = ["rcgen"] }
 rustls = "0.23"
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
 x509-parser = "0.18"

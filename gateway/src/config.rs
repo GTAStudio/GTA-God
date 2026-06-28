@@ -4,6 +4,7 @@
 //! API Token 优先从环境变量 `CLOUDFLARE_API_TOKEN` 或 `cloudflare_api_token_file`
 //! 指向的文件读取，避免像旧版 `run.sh` 那样把 Token 明文 `sed` 进配置文件。
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -11,6 +12,7 @@ use serde::Deserialize;
 
 /// 顶层配置。
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     /// L4 监听地址，例如 `0.0.0.0:443`。
     pub listen: String,
@@ -47,6 +49,7 @@ pub struct Config {
 
 /// 单条 SNI → 上游映射。
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Route {
     /// 匹配的 SNI 主机名：精确（`api.example.com`）或通配（`*.example.com`，
     /// 恰好匹配一层子域名）。精确匹配优先于通配。
@@ -57,6 +60,7 @@ pub struct Route {
 
 /// ACME 配置。
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AcmeConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -97,10 +101,7 @@ impl Config {
             anyhow::bail!("copy_buffer_size 不能为 0");
         }
         if cfg.copy_buffer_size > 4 * 1024 * 1024 {
-            anyhow::bail!(
-                "copy_buffer_size ({}) 超过上限 4MB",
-                cfg.copy_buffer_size
-            );
+            anyhow::bail!("copy_buffer_size ({}) 超过上限 4MB", cfg.copy_buffer_size);
         }
         if cfg.dispatch_timeout_secs == 0 {
             anyhow::bail!("dispatch_timeout_secs 不能为 0");
@@ -140,16 +141,24 @@ impl Config {
     /// 最后回退默认上游。自动 normalize trailing dot 以兼容 FQDN 形式配置。
     pub fn upstream_for(&self, sni: Option<&str>) -> &str {
         if let Some(name) = sni {
-            let key = name.trim_end_matches('.').to_ascii_lowercase();
+            // 常见情况（客户端发小写 SNI）零分配：仅当含大写字母时才 to_ascii_lowercase
+            // 落到一次堆分配；否则 `Cow::Borrowed` 直接复用入参切片。
+            let trimmed = name.trim_end_matches('.');
+            let key: Cow<'_, str> = if trimmed.bytes().any(|b| b.is_ascii_uppercase()) {
+                Cow::Owned(trimmed.to_ascii_lowercase())
+            } else {
+                Cow::Borrowed(trimmed)
+            };
+            let key: &str = key.as_ref();
             // 1) 精确匹配优先。
-            if let Some(upstream) = self.routes_map.get(&key) {
+            if let Some(upstream) = self.routes_map.get(key) {
                 return upstream;
             }
             // 2) 通配匹配：`*.example.com` 仅匹配恰好一层子域名，与泛域名证书
             //    语义一致；可正确拒绝 `evilexample.com`、`a.b.example.com`、
             //    apex `example.com` 等越界/多层情形 → 落到默认上游。
             for (base, upstream) in &self.wildcard_routes {
-                if wildcard_label_matches(base, &key) {
+                if wildcard_label_matches(base, key) {
                     return upstream;
                 }
             }
@@ -327,7 +336,10 @@ mod tests {
     #[test]
     fn wildcard_matching_is_case_and_trailing_dot_insensitive() {
         let cfg = load_str(COMBO);
-        assert_eq!(cfg.upstream_for(Some("Proxy.Example.Com.")), "127.0.0.1:8443");
+        assert_eq!(
+            cfg.upstream_for(Some("Proxy.Example.Com.")),
+            "127.0.0.1:8443"
+        );
         assert_eq!(cfg.upstream_for(Some("API.EXAMPLE.COM.")), "127.0.0.1:8445");
     }
 
@@ -342,7 +354,10 @@ mod tests {
         }"#,
         );
         assert_eq!(cfg.upstream_for(Some("api.example.com")), "127.0.0.1:8445");
-        assert_eq!(cfg.upstream_for(Some("other.example.com")), "127.0.0.1:8443");
+        assert_eq!(
+            cfg.upstream_for(Some("other.example.com")),
+            "127.0.0.1:8443"
+        );
         assert_eq!(cfg.upstream_for(None), "127.0.0.1:8443");
     }
 }

@@ -107,22 +107,32 @@ async fn main() -> anyhow::Result<()> {
 async fn shutdown_signal() {
     #[cfg(unix)]
     {
-        use tokio::signal::unix::{SignalKind, signal};
-        let mut term = match signal(SignalKind::terminate()) {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-        let mut int = match signal(SignalKind::interrupt()) {
-            Ok(s) => s,
-            Err(_) => return,
-        };
+        use tokio::signal::unix::SignalKind;
+        // 任一信号注册失败时回退为永不完成的 future（见 wait_unix_signal），而非
+        // 让本函数立即返回——后者会被 main 的 select! 误判为"已收到退出信号"而
+        // 误触发优雅停机，叠加 --restart=always 可形成 crash-loop。
         tokio::select! {
-            _ = term.recv() => {}
-            _ = int.recv() => {}
+            _ = wait_unix_signal(SignalKind::terminate(), "SIGTERM") => {}
+            _ = wait_unix_signal(SignalKind::interrupt(), "SIGINT") => {}
         }
     }
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+/// 等待单个 Unix 信号；注册失败时记录错误并永久挂起，使该信号源在 `select!` 中
+/// 不可达，但不影响其它信号源，也绝不被误判为"收到信号"。
+#[cfg(unix)]
+async fn wait_unix_signal(kind: tokio::signal::unix::SignalKind, name: &str) {
+    match tokio::signal::unix::signal(kind) {
+        Ok(mut s) => {
+            s.recv().await;
+        }
+        Err(e) => {
+            error!(error = %e, signal = name, "注册退出信号失败，该信号将不可用");
+            std::future::pending::<()>().await;
+        }
     }
 }

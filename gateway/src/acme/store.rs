@@ -123,7 +123,8 @@ impl CertStore {
             };
         };
 
-        let threshold = Duration::from_secs((renew_before_days.max(0) as u64) * SECONDS_PER_DAY);
+        let threshold =
+            Duration::from_secs((renew_before_days.max(0) as u64).saturating_mul(SECONDS_PER_DAY));
         let now = SystemTime::now();
         let recently_issued = now
             .duration_since(certificate.not_before)
