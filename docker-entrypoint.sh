@@ -357,35 +357,6 @@ get_gtacore_restart_delay() {
     esac
 }
 
-# 等待 gtacore 监听端口空闲再启动。根因：--net=host 下旧进程在监听端口的
-# TIME_WAIT 连接残留于宿主网络命名空间；若 gtacore 未设 SO_REUSEADDR，新进程 bind
-# 会 "Address already in use"，短退避(2s)连撞会耗尽重启配额 → --restart=always 死循环。
-# 容器内无 ss/iproute2，故解析 /proc/net/tcp{,6}（local_address 端口为 4 位大写十六进制）。
-# 有界等待（最多 ~75s ≈ TIME_WAIT 60s + 余量）；超时仍启动交由退避重试兑底。
-wait_for_ports_free() {
-    local ports procfiles waited p hex busy
-    ports=$(jq -r '.inbounds[]?.listen_port // empty' "$GTACORE_RUNTIME_CONFIG" 2>/dev/null | sort -u)
-    [ -z "$ports" ] && return 0
-    procfiles="/proc/net/tcp"
-    [ -r /proc/net/tcp6 ] && procfiles="$procfiles /proc/net/tcp6"
-    waited=0
-    while [ "$waited" -lt 75 ]; do
-        busy=""
-        for p in $ports; do
-            hex=$(printf '%04X' "$p" 2>/dev/null) || continue
-            if awk -v pat=":${hex}\$" '$2 ~ pat {f=1} END{exit !f}' $procfiles 2>/dev/null; then
-                busy="${busy} ${p}"
-            fi
-        done
-        [ -z "$busy" ] && return 0
-        echo "⏳ 等待监听端口释放(TIME_WAIT 残留):${busy} ... (${waited}/75s)"
-        isleep 5
-        waited=$((waited + 5))
-    done
-    echo "⚠️  端口在 75s 后仍未完全释放，仍尝试启动 gtacore（可能 EADDRINUSE，将按退避重试）"
-    return 0
-}
-
 start_gtacore() {
     if [ -n "$GTACORE_PID" ] && kill -0 "$GTACORE_PID" 2>/dev/null; then
         return 0
@@ -401,8 +372,8 @@ start_gtacore() {
 
     ensure_gtacore_token
     ensure_gtacore_log_forwarder
-    # --net=host 重建/重启竞态：启动前等监听端口的 TIME_WAIT 残留释放，避免 EADDRINUSE。
-    wait_for_ports_free
+    # gtacore inbound 与 gtagate 监听均已设 SO_REUSEADDR：--net=host 重建/重启时
+    # 即使端口残留 TIME_WAIT 也能立即重绑，无需等待端口释放（消除 ~55s 重启黑屏）。
     gtacore run --config "$GTACORE_RUNTIME_CONFIG" --token-file "$GTACORE_TOKEN_FILE" >> "$GTACORE_LOG_FILE" 2>&1 &
     GTACORE_PID=$!
     echo "✅ gtacore started with PID: $GTACORE_PID"
