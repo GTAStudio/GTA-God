@@ -24,6 +24,18 @@
 !healthcheck.sh
 
 # =========================================
+# gtagate 网关源码 + 预构建二进制（白名单，防新文件被 * 静默忽略；不动 gateway/target）
+# =========================================
+!bin/
+!bin/gtacore
+!bin/gtacore.sha256
+!gateway/
+!gateway/src/
+!gateway/src/**
+!gateway/Cargo.toml
+!gateway/Cargo.lock
+
+# =========================================
 # 部署脚本和配置模板
 # =========================================
 !run.sh

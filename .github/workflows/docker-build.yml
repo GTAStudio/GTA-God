@@ -122,6 +122,7 @@ jobs:
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
       - name: Sign image (keyless Sigstore/Fulcio)
+        id: sign
         if: github.event_name != 'pull_request'
         continue-on-error: true   # 签名失败不阻断已完成的 push
         env:
@@ -134,7 +135,21 @@ jobs:
             images="${images}${tag}@${DIGEST} "
           done
           cosign sign --yes ${images}
-          echo "✅ Signed. 任意用户可验签（无需密钥）:"
-          echo "   cosign verify ${{ secrets.DOCKERHUB_USERNAME }}/gtagod@${DIGEST} \\"
+          echo "✅ Signed."
+
+      - name: Verify signature (cosign verify, fail-closed)
+        # 仅在签名成功后执行；签名成功却验签失败说明签名链有问题，此时严格 fail（不
+        # continue-on-error），以免发布出「看似已签名实则无法验证」的镜像（供应链安全：sign-then-verify）。
+        if: github.event_name != 'pull_request' && steps.sign.outcome == 'success'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          IMAGE_REPO: ${{ secrets.DOCKERHUB_USERNAME }}/gtagod
+        run: |
+          echo "🔍 Verifying cosign keyless signature for ${IMAGE_REPO}@${DIGEST}..."
+          cosign verify "${IMAGE_REPO}@${DIGEST}" \
+            --certificate-identity-regexp '.*/GTA-God/.github/workflows/docker-build.yml@.*' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          echo "✅ Signature verified. 任意用户可复现验签:"
+          echo "   cosign verify ${IMAGE_REPO}@${DIGEST} \\"
           echo "     --certificate-identity-regexp '.*/GTA-God/.github/workflows/docker-build.yml@.*' \\"
           echo "     --certificate-oidc-issuer https://token.actions.githubusercontent.com"

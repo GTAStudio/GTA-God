@@ -269,9 +269,12 @@ echo "✅ gtagate started with PID: $GATE_PID"
 # =========================================
 # 等待证书后启动 gtacore
 # =========================================
-CERT_WAIT_MAX="${CERT_WAIT_MAX:-180}"
-CERT_RETRY_INTERVAL="${CERT_RETRY_INTERVAL:-30}"
-CERT_RETRY_MAX="${CERT_RETRY_MAX:-10}"
+# 数值 env 守卫：非纯数字（运维误填如 CERT_WAIT_MAX=abc）时回退默认值，
+# 避免后续 `[ -lt ]` 算术比较报 "integer expression expected" 致循环行为异常。
+_num_or() { case "$1" in '' | *[!0-9]*) printf '%s' "$2" ;; *) printf '%s' "$1" ;; esac; }
+CERT_WAIT_MAX=$(_num_or "${CERT_WAIT_MAX:-180}" 180)
+CERT_RETRY_INTERVAL=$(_num_or "${CERT_RETRY_INTERVAL:-30}" 30)
+CERT_RETRY_MAX=$(_num_or "${CERT_RETRY_MAX:-10}" 10)
 GTACORE_RESTART_ATTEMPTS=0
 GTACORE_MAX_RESTART_ATTEMPTS=10
 GTACORE_TOKEN_FILE="${GTACORE_TOKEN_FILE:-/tmp/gtacore-token}"
@@ -596,6 +599,9 @@ echo "========================================="
 # =========================================
 
 CERT_MTIME=""
+# 证书热重载失败计数（有界重试）：reload 成功清零；连续失败达上限则放弃本次更新以防风暴。
+CERT_RELOAD_FAILS=0
+CERT_RELOAD_MAX_FAILS=3
 if [ "$NEEDS_CERT" = "true" ] && [ -n "$ACTUAL_CERT" ] && [ -f "$ACTUAL_CERT" ]; then
     CERT_MTIME=$(stat -c %Y "$ACTUAL_CERT" 2>/dev/null || stat -f %m "$ACTUAL_CERT" 2>/dev/null || echo "")
 fi
@@ -626,29 +632,28 @@ while true; do
         fi
     fi
 
-    # 检查证书是否更新（自动重载 gtacore）
+    # 检查证书是否更新（自动重载 gtacore）。reload 成功才推进 CERT_MTIME（失败则下轮重试，
+    # 用有界失败计数防止持续失败时每 10s 重载风暴）；任何失败都不强停健康进程。
     if [ "$NEEDS_CERT" = "true" ] && [ -n "$ACTUAL_CERT" ] && [ -f "$ACTUAL_CERT" ]; then
         NEW_MTIME=$(stat -c %Y "$ACTUAL_CERT" 2>/dev/null || stat -f %m "$ACTUAL_CERT" 2>/dev/null || echo "")
         if [ -n "$NEW_MTIME" ] && [ -n "$CERT_MTIME" ] && [ "$NEW_MTIME" != "$CERT_MTIME" ]; then
             echo "🔄 Certificate updated, reloading gtacore..."
-            CERT_MTIME="$NEW_MTIME"
-            if ! update_cert_paths; then
-                echo "❌ Failed to update certificate paths after cert change; skipping reload"
-                continue
-            fi
-            if [ -n "$GTACORE_PID" ] && kill -0 "$GTACORE_PID" 2>/dev/null; then
-                if reload_gtacore; then
-                    echo "✅ gtacore reloaded with new certificate"
+            if update_cert_paths && reload_gtacore; then
+                CERT_MTIME="$NEW_MTIME"
+                CERT_RELOAD_FAILS=0
+                echo "✅ gtacore reloaded with new certificate"
+            else
+                CERT_RELOAD_FAILS=$((CERT_RELOAD_FAILS + 1))
+                if [ "$CERT_RELOAD_FAILS" -ge "$CERT_RELOAD_MAX_FAILS" ]; then
+                    # 达失败上限：推进 mtime 放弃本次更新（防重载风暴），保留当前 gtacore。
+                    # reload 失败两种情况都不影响在跑的进程：①sing-box check 失败→gtacore 仍跑旧合法
+                    # 配置；②重启后未起来→start_gtacore 已按 required 策略 exit 或清空 PID 交监控循环
+                    # 顶部带退避重启。故此处绝不再 stop 一个健康进程（消除旧 fallback 误杀+退整容器）。
+                    echo "⚠️  证书重载连续失败 ${CERT_RELOAD_FAILS} 次，暂停至下次证书变化；保留当前 gtacore（旧配置仍提供服务）"
+                    CERT_MTIME="$NEW_MTIME"
+                    CERT_RELOAD_FAILS=0
                 else
-                    echo "⚠️  Hot reload failed, falling back to restart..."
-                    stop_gtacore
-                    isleep 2
-                    start_gtacore
-                    if [ -n "$GTACORE_PID" ] && kill -0 "$GTACORE_PID" 2>/dev/null; then
-                        echo "✅ gtacore restarted with new certificate"
-                    else
-                        echo "❌ gtacore restart failed"
-                    fi
+                    echo "⚠️  证书重载未成功 (${CERT_RELOAD_FAILS}/${CERT_RELOAD_MAX_FAILS})，下一轮重试（不强停健康进程）"
                 fi
             fi
         fi

@@ -15,6 +15,14 @@ updates:
           - rustls*
           - instant-acme
           - x509-parser
+      # 其余依赖的 minor/patch 合并为单个 PR，减少噪音；major 仍单独成 PR 以便人工评审。
+      # （同时匹配 rust-runtime 的包按组定义顺序优先进 rust-runtime，不会重复计入。）
+      cargo-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
 
   - package-ecosystem: docker
     directory: /
@@ -23,6 +31,11 @@ updates:
     open-pull-requests-limit: 5
     cooldown:
       default-days: 7
+    ignore:
+      # rust builder 镜像钉定 1.96（项目 rust-version + edition 2024 要求）：仅跟同 tag 的
+      # digest 安全更新，忽略 rust 的 minor/major tag 升级；debian runtime 不忽略，正常跟安全补丁/版本。
+      - dependency-name: "rust"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /

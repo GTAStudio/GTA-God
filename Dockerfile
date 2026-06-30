@@ -20,36 +20,37 @@
 #
 # =========================================
 
-ARG RUST_VERSION=1.96
-ARG DEBIAN_VERSION=13-slim
-# 基镜像 digest 钉死（供应链：防上游 re-tag 静默替换；更新 tag 时须同步更新 digest）。
-# 取值：docker buildx imagetools inspect rust:1.96-alpine / debian:13-slim
-ARG RUST_DIGEST=sha256:f87aa870663e2b57ec8c69de82c7eedf7383bee987eef7612c0359635eaadb41
-ARG DEBIAN_DIGEST=sha256:4e401d95de7083948053197a9c3913343cd06b706bf15eb6a0c3ccd26f436a0e
+# 基镜像 tag@digest 内联（不再用 ARG 间接）：使 dependabot 的 docker updater 能解析并自动
+# 跟踪 base image 的 digest 安全更新（ARG 间接它无法解析，旧写法下 dependabot docker 形同虚设）。
+# rust 已在 dependabot.yml 忽略 minor/major（保持 1.96，仅跟同 tag 的 digest）；debian 跟安全补丁
+# （major 升级由人审 PR）。更新 tag 时须同步 digest（docker buildx imagetools inspect rust:1.96-alpine / debian:13-slim）。
 
 # =========================================
 # 构建阶段 1 - gtagate (Rust L4 网关 + ACME)
 # =========================================
-FROM rust:${RUST_VERSION}-alpine@${RUST_DIGEST} AS rust-builder
+FROM rust:1.96-alpine@sha256:f87aa870663e2b57ec8c69de82c7eedf7383bee987eef7612c0359635eaadb41 AS rust-builder
 
 # aws-lc-rs (rustls/instant-acme 默认后端) 需要 C 工具链 + cmake + perl
 RUN apk add --no-cache musl-dev cmake make gcc g++ perl pkgconfig
 
 WORKDIR /build
-# 先拷依赖清单以利用层缓存
+# 依赖层（关键缓存层）：先只 COPY manifest + 占位 main.rs，编译并缓存全部依赖。此 RUN 的产物
+# 进入独立镜像层，仅随 Cargo.toml/lock 变化 → 改 gateway 源码时该层 layer-cache 命中（CI 的
+# gha cache 持久），依赖无需重编/重下。这取代了在 CI 全新 runner 上不持久的 BuildKit
+# `--mount=type=cache`（cache-to: gha 不导出 cache mount，旧写法在 CI 形同无缓存、每次全量编 aws-lc-rs）。
 COPY gateway/Cargo.toml gateway/Cargo.lock ./
-COPY gateway/src ./src
+RUN mkdir -p src && echo 'fn main() {}' > src/main.rs && \
+    cargo build --release --locked
 
-# --locked 确保与提交的 Cargo.lock 可重复构建
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/build/target \
-    cargo build --release --locked && \
+# 应用层：COPY 真实源码后仅增量编译 gtagate（依赖已在上层缓存）。
+COPY gateway/src ./src
+RUN cargo build --release --locked && \
     cp target/release/gtagate /usr/local/bin/gtagate
 
 # 运行阶段 - debian 13-slim (glibc 2.41)
-# gtacore 为 glibc 二进制；debian glibc 在代理高并发/加解密负载下吞吞优于 musl。
+# gtacore 为 glibc 二进制；debian glibc 在代理高并发/加解密负载下吞吐优于 musl。
 # gtagate 为 musl 静态二进制，可在 glibc 系统直接运行。
-FROM debian:${DEBIAN_VERSION}@${DEBIAN_DIGEST}
+FROM debian:13-slim@sha256:4e401d95de7083948053197a9c3913343cd06b706bf15eb6a0c3ccd26f436a0e
 
 # 元数据：镜像语义版本=所打包的 gtacore 版本（单一 source of truth）。
 # CI 从 bin/gtacore 读出真版本并经 --build-arg GTAGOD_VERSION 注入；本地构建用默认值。
