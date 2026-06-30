@@ -34,15 +34,12 @@ FROM rust:1.96-alpine@sha256:f87aa870663e2b57ec8c69de82c7eedf7383bee987eef7612c0
 RUN apk add --no-cache musl-dev cmake make gcc g++ perl pkgconfig
 
 WORKDIR /build
-# 依赖层（关键缓存层）：先只 COPY manifest + 占位 main.rs，编译并缓存全部依赖。此 RUN 的产物
-# 进入独立镜像层，仅随 Cargo.toml/lock 变化 → 改 gateway 源码时该层 layer-cache 命中（CI 的
-# gha cache 持久），依赖无需重编/重下。这取代了在 CI 全新 runner 上不持久的 BuildKit
-# `--mount=type=cache`（cache-to: gha 不导出 cache mount，旧写法在 CI 形同无缓存、每次全量编 aws-lc-rs）。
+# 直接 COPY 全部源码后一次性编译（--locked 与提交的 Cargo.lock 可重复构建）。改 gateway/src
+# 任意文件会使本层失效、全量重编(含依赖)；但这种 push 少见——多数是 gtacore 升级不碰 gateway/src，
+# 此时 COPY+RUN 两层经 gha layer-cache 整体命中、跳过编译，与依赖预构建同样快。
+# ⚠️ 不用 dummy-main 依赖预构建层：COPY 真实源码保留的旧 mtime < dummy 产物 mtime → cargo 误判
+# main.rs 未变而跳过重编 → cp 出 dummy 空壳(417KB) → 容器 gtagate 起不来（2026-06-30 实测踩坑）。
 COPY gateway/Cargo.toml gateway/Cargo.lock ./
-RUN mkdir -p src && echo 'fn main() {}' > src/main.rs && \
-    cargo build --release --locked
-
-# 应用层：COPY 真实源码后仅增量编译 gtagate（依赖已在上层缓存）。
 COPY gateway/src ./src
 RUN cargo build --release --locked && \
     cp target/release/gtagate /usr/local/bin/gtagate
