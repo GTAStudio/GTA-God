@@ -297,18 +297,28 @@ async fn splice_one_direction(
 
     loop {
         // src socket → pipe：等待源可读；splice 返回 EAGAIN 时 async_io 自动清 readiness 并挂起。
+        // 写入端是 pipe，SPLICE_F_MORE 对 pipe 无意义，故 more=false。
         let n = src
-            .async_io(Interest::READABLE, || splice_raw(src_fd, pipe_w, CHUNK))
+            .async_io(Interest::READABLE, || {
+                splice_raw(src_fd, pipe_w, CHUNK, false)
+            })
             .await?;
         if n == 0 {
             return Ok(()); // 源 EOF
         }
 
         // pipe → dst socket：把 pipe 中的 n 字节全部写出。
+        // more = 本轮从源读满了 CHUNK（大概率后续还有数据）→ 给写 socket 附加 SPLICE_F_MORE，
+        // 让内核 cork 聚合成满 MSS 段（YouTube 等大流下行吞吐受益，类比 TCP_CORK/MSG_MORE）；
+        // 未读满（流尾/突发间隙/交互式小流）→ more=false，配合 TCP_NODELAY 立即发出不引入延迟。
+        // EOF 时调用方的 shutdown(Write) 会 flush 任何 cork 残留，内核 200ms cork 定时器亦兜底。
+        let more = n == CHUNK;
         let mut remaining = n;
         while remaining > 0 {
             let written = dst
-                .async_io(Interest::WRITABLE, || splice_raw(pipe_r, dst_fd, remaining))
+                .async_io(Interest::WRITABLE, || {
+                    splice_raw(pipe_r, dst_fd, remaining, more)
+                })
                 .await?;
             if written == 0 {
                 return Err(io::Error::new(
@@ -322,13 +332,19 @@ async fn splice_one_direction(
 }
 
 /// 裸 splice(2) 包装：EAGAIN → `ErrorKind::WouldBlock`（供 `async_io` 识别并挂起，而非空转）。
+/// `more=true` 时附加 `SPLICE_F_MORE`（仅在写入端为 socket 时有意义）：提示内核后续还有数据，
+/// 等同 `TCP_CORK`/`MSG_MORE`，把连续 splice 聚合成满 MSS 段，减少小包、提升大流吞吐。
 #[cfg(target_os = "linux")]
 fn splice_raw(
     fd_in: std::os::fd::RawFd,
     fd_out: std::os::fd::RawFd,
     len: usize,
+    more: bool,
 ) -> io::Result<usize> {
-    const FLAGS: libc::c_uint = (libc::SPLICE_F_MOVE | libc::SPLICE_F_NONBLOCK) as libc::c_uint;
+    let mut flags = (libc::SPLICE_F_MOVE | libc::SPLICE_F_NONBLOCK) as libc::c_uint;
+    if more {
+        flags |= libc::SPLICE_F_MORE as libc::c_uint;
+    }
     loop {
         // SAFETY: fd_in/fd_out 由调用方保证有效（来自存活的 TcpStream / Pipe）；
         // 两个 offset 传 null 表示使用各自隐含偏移（socket/pipe 无 seek 偏移）。
@@ -339,7 +355,7 @@ fn splice_raw(
                 fd_out,
                 std::ptr::null_mut(),
                 len,
-                FLAGS,
+                flags,
             )
         };
         if ret < 0 {

@@ -44,8 +44,13 @@ const ACME_LOCK_FILE: &str = ".gtagate-acme.lock";
 /// DNS-01 TXT 传播轮询间隔。
 const DNS_PROPAGATION_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
-/// 单次 DoH 查询超时。
+/// 单次 DoH 查询总超时。
 const DNS_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// 单次 DoH 连接（含 TLS 握手）建立超时。与查询总超时分离：让"接受 TCP 但 TLS 卡死"
+/// 的死 resolver 在 5s 内快速失败、转向下一个解析器，而非烧满 10s 总超时。与
+/// cloudflare.rs 的 HTTP 客户端 connect_timeout 对齐。
+const DNS_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 const DNS_JSON_RESOLVERS: [&str; 2] = [
     "https://cloudflare-dns.com/dns-query",
@@ -634,6 +639,7 @@ async fn wait_for_dns_txt(
     let http = HttpClient::builder()
         .user_agent("gtagate/0.1")
         .timeout(DNS_QUERY_TIMEOUT)
+        .connect_timeout(DNS_CONNECT_TIMEOUT)
         .build()
         .map_err(|e| anyhow::anyhow!("构建 DNS 查询客户端失败: {e}"))?;
 

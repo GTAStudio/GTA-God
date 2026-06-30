@@ -208,7 +208,13 @@ impl CertStore {
 
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() {
+            // 用 DirEntry::file_type()（不跟随符号链接）而非 Path::is_dir()（会跟随符号链接）。
+            // 后者遇到指回祖先目录的符号链接会无限递归 → 栈溢出 → panic=abort →
+            // --restart 持续崩溃循环（环在持久卷里，每次启动首轮 reconcile 即崩）。
+            // 证书目录是纯目录布局，跳过符号链接子目录无功能损失；指向证书文件的符号
+            // 链接仍会在下方按扩展名进入 candidates（read_matching_cert_times 的 fs::read
+            // 跟随读取目标），故"符号链接指向证书文件"的用法不受影响。
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
                 self.collect_cert_paths(&path, seen, candidates);
             } else if path
                 .extension()
