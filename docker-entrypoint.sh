@@ -219,6 +219,8 @@ fi
 isleep() { sleep "$1" & wait $!; }
 
 cleanup() {
+    # 进入清理即忽略后续 TERM/INT/QUIT，保证清理过程不被二次信号打断/重入（幂等加固）。
+    trap '' TERM INT QUIT
     echo "🛑 Received stop signal, shutting down gracefully..."
     # Send SIGTERM to all managed processes
     for _pid_var in GTACORE_PID GATE_PID LOG_TAIL_PID; do

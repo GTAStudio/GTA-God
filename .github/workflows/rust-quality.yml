@@ -31,6 +31,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false # 后续无 git 推送，不让 GITHUB_TOKEN 驻留 .git/config（最小暴露面）
 
       # 固定到与 Docker 构建一致的 Rust 1.96（edition 2024），避免本地/CI/镜像版本漂移。
       # 注：x86_64-linux 上 aws-lc-rs(非-FIPS) 用预生成 bindings，仅需 ubuntu-latest 自带的 C 工具链，无需额外装 cmake/clang。
@@ -41,15 +43,20 @@ jobs:
           rustup default 1.96
           rustc --version && cargo --version
 
+      # 缓存 ~/.cargo registry/git + target + cargo bin（cache-bin 默认含 cargo-audit），按 Cargo.lock+rustc 分桶。
+      # 冷缓存下 clippy/test/audit 重复全量编译 aws-lc-rs 等是最大 CI 开销，缓存后通常数分钟 → 30-60s。
+      - name: Cache cargo (Swatinem/rust-cache)
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: gateway
+
       - name: rustfmt (check)
         run: cargo fmt --all --check
 
       - name: clippy (deny warnings)
         run: cargo clippy --all-targets --locked -- -D warnings
 
-      - name: cargo check
-        run: cargo check --all-targets --locked
-
+      # 不单独跑 cargo check：clippy 是 check 的超集（过 clippy 必过 check），省一轮近全量编译。
       - name: cargo test
         run: cargo test --all-targets --locked
 

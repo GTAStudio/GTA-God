@@ -36,13 +36,16 @@ concurrency:
 
 jobs:
   build-and-push:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: read
       id-token: write   # cosign keyless（Sigstore/Fulcio）签名所需（OIDC）
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false # 后续无 git 推送，不让 GITHUB_TOKEN 驻留 .git/config
 
       - name: Read gtacore version (single source of truth)
         id: gtacore
@@ -98,15 +101,17 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Verify image
+        env:
+          IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/gtagod@${{ steps.push.outputs.digest }}
         run: |
-          echo "🔍 Verifying GTAGod v${{ steps.gtacore.outputs.version }} image..."
-          docker pull ${{ secrets.DOCKERHUB_USERNAME }}/gtagod:latest
+          echo "🔍 Verifying GTAGod v${{ steps.gtacore.outputs.version }} image (by digest)..."
+          docker pull "$IMAGE"
 
           echo "📦 Checking gtagate..."
-          docker run --rm --entrypoint gtagate ${{ secrets.DOCKERHUB_USERNAME }}/gtagod:latest --version
+          docker run --rm --entrypoint gtagate "$IMAGE" --version
 
           echo "📦 Checking gtacore..."
-          docker run --rm --entrypoint gtacore ${{ secrets.DOCKERHUB_USERNAME }}/gtagod:latest sing-box version
+          docker run --rm --entrypoint gtacore "$IMAGE" sing-box version
 
           echo "✅ GTAGod v${{ steps.gtacore.outputs.version }} verification passed!"
           echo "   - gtagate: L4 SNI + ACME + splice(2) zero-copy"

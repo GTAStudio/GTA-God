@@ -21,7 +21,6 @@
 # =========================================
 
 ARG RUST_VERSION=1.96
-ARG ALPINE_VERSION=3.23
 ARG DEBIAN_VERSION=13-slim
 # 基镜像 digest 钉死（供应链：防上游 re-tag 静默替换；更新 tag 时须同步更新 digest）。
 # 取值：docker buildx imagetools inspect rust:1.96-alpine / debian:13-slim
@@ -45,7 +44,6 @@ COPY gateway/src ./src
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
     cargo build --release --locked && \
-    strip target/release/gtagate && \
     cp target/release/gtagate /usr/local/bin/gtagate
 
 # 运行阶段 - debian 13-slim (glibc 2.41)
