@@ -47,7 +47,7 @@ RUN cargo build --release --locked && \
 # 运行阶段 - debian 13-slim (glibc 2.41)
 # gtacore 为 glibc 二进制；debian glibc 在代理高并发/加解密负载下吞吐优于 musl。
 # gtagate 为 musl 静态二进制，可在 glibc 系统直接运行。
-FROM debian:13-slim@sha256:4e401d95de7083948053197a9c3913343cd06b706bf15eb6a0c3ccd26f436a0e
+FROM debian:13-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
 
 # 元数据：镜像语义版本=所打包的 gtacore 版本（单一 source of truth）。
 # CI 从 bin/gtacore 读出真版本并经 --build-arg GTAGOD_VERSION 注入；本地构建用默认值。
