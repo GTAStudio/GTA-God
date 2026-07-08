@@ -28,7 +28,7 @@
 # =========================================
 # 构建阶段 1 - gtagate (Rust L4 网关 + ACME)
 # =========================================
-FROM rust:1.96-alpine@sha256:f87aa870663e2b57ec8c69de82c7eedf7383bee987eef7612c0359635eaadb41 AS rust-builder
+FROM rust:1.96-alpine@sha256:a41f7740f8b45d45795624eec13a8b42263cc700f19f7e4e86e04d3dda08a479 AS rust-builder
 
 # aws-lc-rs (rustls/instant-acme 默认后端) 需要 C 工具链 + cmake + perl
 RUN apk add --no-cache musl-dev cmake make gcc g++ perl pkgconfig
