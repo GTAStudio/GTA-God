@@ -9,9 +9,6 @@ on:
       - 'healthcheck.sh'
       - 'bin/**'
       - 'gateway/**'
-      - 'rust-toolchain.toml'
-      - 'singbox-config.*.example'
-      - 'gtagod.conf.example'
       - '.github/workflows/docker-build.yml'
   workflow_dispatch:
     inputs:
@@ -26,12 +23,13 @@ concurrency:
   cancel-in-progress: true
 
 # =========================================
-# GTAGod v0.1.8 - Pure Rust 统一架构
+# GTAGod - Pure Rust 九轴统一架构
 # =========================================
 #
 # 架构:
 #   - gtagate (Rust musl): L4 SNI 分流 + ACME + splice(2) 零拷贝
-#   - gtacore (Rust glibc): naive + anytls + anyreality
+#   - gtacore (Rust glibc): Naive / AnyTLS / AnyReality / Hysteria2 /
+#     Mieru TCP+UDP / VLESS WS / VLESS Reality / AmneziaWG
 #
 # =========================================
 
@@ -80,7 +78,7 @@ jobs:
           labels: |
             org.opencontainers.image.version=${{ steps.gtacore.outputs.version }}
             org.opencontainers.image.title=gtagod
-            org.opencontainers.image.description=GTAGod - GTACore (Rust) naive+anytls+anyreality + gtagate L4
+            org.opencontainers.image.description=GTAGod - GTACore ${{ steps.gtacore.outputs.version }} nine-protocol server + gtagate L4
             org.opencontainers.image.licenses=MIT
 
       - name: Build and push
@@ -116,7 +114,7 @@ jobs:
 
           echo "✅ GTAGod v${{ steps.gtacore.outputs.version }} verification passed!"
           echo "   - gtagate: L4 SNI + ACME + splice(2) zero-copy"
-          echo "   - gtacore: naive + anytls + anyreality"
+          echo "   - gtacore: nine-protocol server portfolio"
 
       - name: Install Cosign
         if: github.event_name != 'pull_request'
