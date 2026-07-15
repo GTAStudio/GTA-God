@@ -13,7 +13,8 @@
 !.gitignore
 !.gitattributes
 !.github/
-!.github/**
+!.github/workflows/
+!.github/workflows/docker-build.yml
 
 # =========================================
 # Docker 构建文件
@@ -34,22 +35,8 @@
 !gateway/src/**
 !gateway/Cargo.toml
 !gateway/Cargo.lock
-
-# =========================================
-# 部署脚本和配置模板
-# =========================================
-!run.sh
-!build-and-push.sh
-!gtagod.conf.example
-!Caddyfile.*.example
-!singbox-config.*.example
-
-# =========================================
-# 文档
-# =========================================
-!README.md
-!CLIENT.md
-!FRIEND-GUIDE.md
+!gateway/.cargo/
+!gateway/.cargo/config.toml
 
 # =========================================
 # 敏感文件 (始终忽略)
