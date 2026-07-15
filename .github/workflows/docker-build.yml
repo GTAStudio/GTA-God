@@ -9,6 +9,7 @@ on:
       - 'healthcheck.sh'
       - 'bin/**'
       - 'gateway/**'
+      - 'rust-toolchain.toml'
       - 'singbox-config.*.example'
       - 'gtagod.conf.example'
       - '.github/workflows/docker-build.yml'
@@ -43,7 +44,7 @@ jobs:
       id-token: write   # cosign keyless（Sigstore/Fulcio）签名所需（OIDC）
     steps:
       - name: Checkout repository
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false # 后续无 git 推送，不让 GITHUB_TOKEN 驻留 .git/config
 
@@ -57,17 +58,17 @@ jobs:
           echo "Detected gtacore version: ${ver}"
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Login to Docker Hub
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Extract metadata
         id: meta
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ secrets.DOCKERHUB_USERNAME }}/gtagod
           tags: |
@@ -84,7 +85,7 @@ jobs:
 
       - name: Build and push
         id: push
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: ./Dockerfile

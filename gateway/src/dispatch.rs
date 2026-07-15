@@ -2,10 +2,10 @@
 //! 连接透传（passthrough）到对应上游。等价于 caddy-l4 在本项目中的用法。
 //!
 //! Linux 上使用 splice(2) 零拷贝，数据在内核态通过 pipe 直接转发，
-//! 不经过用户态 buffer，YouTube 视频流等高吞吐场景可省 20-40% CPU。
+//! 不经过用户态 buffer；非 Linux 平台回退到有界用户态缓冲。
 //! 非 Linux 平台 fallback 到 tokio copy_bidirectional。
-#![allow(unsafe_code)] // splice(2) FFI 需要 unsafe，仅限本模块
 
+use std::future::Future;
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,8 +13,8 @@ use std::time::Duration;
 use socket2::SockRef;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpSocket, TcpStream};
-use tokio::sync::Semaphore;
-use tokio::time::timeout;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
+use tokio::time::{Instant, sleep_until, timeout};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tracing::{debug, info, warn};
@@ -66,11 +66,22 @@ pub async fn run(cfg: Arc<Config>, cancel: CancellationToken) -> anyhow::Result<
     let listener = socket
         .listen(1024)
         .map_err(|e| anyhow::anyhow!("监听 {} 失败: {e}", cfg.listen))?;
-    info!(listen = %cfg.listen, max_connections = cfg.max_connections, "L4 SNI 分流器已启动");
+    info!(
+        listen = %cfg.listen,
+        max_connections = cfg.max_connections,
+        max_handshake_connections = cfg.max_handshake_connections,
+        relay_idle_timeout_secs = cfg.relay_idle_timeout_secs,
+        "L4 SNI 分流器已启动"
+    );
 
-    // 并发连接上限：0 表示不限制；否则用信号量背压，抵御资源耗尽型攻击。
-    let limiter = if cfg.max_connections > 0 {
+    // ClientHello 与已建立连接使用独立预算，慢握手无法耗尽全部转发连接许可。
+    let connection_limiter = if cfg.max_connections > 0 {
         Some(Arc::new(Semaphore::new(cfg.max_connections)))
+    } else {
+        None
+    };
+    let handshake_limiter = if cfg.max_handshake_connections > 0 {
+        Some(Arc::new(Semaphore::new(cfg.max_handshake_connections)))
     } else {
         None
     };
@@ -79,9 +90,8 @@ pub async fn run(cfg: Arc<Config>, cancel: CancellationToken) -> anyhow::Result<
     let tracker = TaskTracker::new();
 
     loop {
-        // 在 accept 之前先取并发许可，达到上限时自然背压（不会无界堆积）。
-        // 用 select! 包裹 acquire，确保在 max_connections 处 park 时仍能立即观察到 cancel。
-        let permit = match &limiter {
+        // 在 accept 前取得慢握手许可，达到上限时由内核 listen backlog 有界背压。
+        let handshake_permit = match &handshake_limiter {
             Some(sem) => {
                 tokio::select! {
                     biased;
@@ -109,9 +119,16 @@ pub async fn run(cfg: Arc<Config>, cancel: CancellationToken) -> anyhow::Result<
                     }
                 };
                 let cfg = Arc::clone(&cfg);
+                let connection_limiter = connection_limiter.clone();
                 tracker.spawn(async move {
-                    let _permit = permit;
-                    if let Err(e) = handle_connection(client, cfg).await {
+                    if let Err(e) = handle_connection(
+                        client,
+                        cfg,
+                        handshake_permit,
+                        connection_limiter,
+                    )
+                    .await
+                    {
                         debug!(peer = %peer, error = %e, "连接处理结束");
                     }
                 });
@@ -141,15 +158,18 @@ async fn read_sni(
     timeout_secs: u64,
 ) -> anyhow::Result<(Option<String>, Vec<u8>)> {
     // 直接读入 buf 的 spare capacity（read_buf，无 chunk 中转、无额外 memcpy）。
+    // Take 将每次底层读取限制在剩余预算内，使 16 KiB 成为真实硬上限。
     let mut buf: Vec<u8> = Vec::with_capacity(2048);
 
     let sni = timeout(Duration::from_secs(timeout_secs), async {
         loop {
-            // read_buf 不会自动扩容：容量用尽时先 reserve，确保有可写空间。
-            if buf.len() == buf.capacity() {
-                buf.reserve(2048);
+            let remaining = MAX_CLIENT_HELLO.saturating_sub(buf.len());
+            if remaining == 0 {
+                return Ok::<Option<String>, io::Error>(None);
             }
-            let n = client.read_buf(&mut buf).await?;
+            buf.reserve(remaining.min(2048));
+            let mut limited = (&mut *client).take(remaining as u64);
+            let n = limited.read_buf(&mut buf).await?;
             if n == 0 {
                 return Ok::<Option<String>, io::Error>(None);
             }
@@ -157,7 +177,7 @@ async fn read_sni(
                 SniResult::Found(host) => return Ok(Some(host)),
                 SniResult::NoSni | SniResult::Invalid => return Ok(None),
                 SniResult::Incomplete => {
-                    if buf.len() > MAX_CLIENT_HELLO {
+                    if buf.len() == MAX_CLIENT_HELLO {
                         return Ok(None);
                     }
                     continue;
@@ -172,12 +192,22 @@ async fn read_sni(
 }
 
 /// 处理单个客户端连接：读 SNI → 选上游 → 透传双向拷贝。
-async fn handle_connection(mut client: TcpStream, cfg: Arc<Config>) -> anyhow::Result<()> {
+async fn handle_connection(
+    mut client: TcpStream,
+    cfg: Arc<Config>,
+    handshake_permit: Option<OwnedSemaphorePermit>,
+    connection_limiter: Option<Arc<Semaphore>>,
+) -> anyhow::Result<()> {
     let _ = client.set_nodelay(true);
     set_tcp_keepalive(&client);
 
     // SNI 读取在独立函数中，返回后读取缓冲自动释放。
     let (sni, initial_data) = read_sni(&mut client, cfg.dispatch_timeout_secs).await?;
+    drop(handshake_permit);
+
+    // 不等待已建立连接许可：满载时立即拒绝新连接，避免完成握手的 socket
+    // 在用户态形成无界等待队列，同时不影响已建立连接。
+    let _connection_permit = try_acquire_connection(connection_limiter)?;
 
     // upstream_for 返回借用自 cfg 的 &str，cfg 生命周期覆盖整个函数，省去 to_string 分配。
     let upstream_addr = cfg.upstream_for(sni.as_deref());
@@ -198,20 +228,96 @@ async fn handle_connection(mut client: TcpStream, cfg: Arc<Config>) -> anyhow::R
     upstream.write_all(&initial_data).await?;
     drop(initial_data);
 
-    // Linux: splice(2) 零拷贝——数据在内核态通过 pipe 直接从 source socket 移到 dest socket，
-    // 完全不经过用户态 buffer，YouTube 视频流等高吞吐场景可省 20-40% CPU。
-    // 非 Linux: fallback 到 copy_bidirectional_with_sizes（用户态拷贝）。
+    // Linux 使用 splice(2) 零拷贝；非 Linux 使用有界用户态缓冲。
+    let activity = ActivityTracker::new();
+    let idle_timeout =
+        (cfg.relay_idle_timeout_secs > 0).then(|| Duration::from_secs(cfg.relay_idle_timeout_secs));
     #[cfg(target_os = "linux")]
-    {
-        copy_bidirectional_splice(&client, &upstream).await?;
-    }
+    relay_with_idle_timeout(
+        copy_bidirectional_splice(&client, &upstream, &activity),
+        idle_timeout,
+        &activity,
+    )
+    .await?;
     #[cfg(not(target_os = "linux"))]
-    {
-        let buf_size = cfg.copy_buffer_size.max(8 * 1024);
-        tokio::io::copy_bidirectional_with_sizes(&mut client, &mut upstream, buf_size, buf_size)
-            .await?;
-    }
+    relay_with_idle_timeout(
+        copy_bidirectional_buffered(
+            &mut client,
+            &mut upstream,
+            cfg.copy_buffer_size.max(8 * 1024),
+            &activity,
+        ),
+        idle_timeout,
+        &activity,
+    )
+    .await?;
     Ok(())
+}
+
+fn try_acquire_connection(
+    limiter: Option<Arc<Semaphore>>,
+) -> anyhow::Result<Option<OwnedSemaphorePermit>> {
+    limiter
+        .map(|limiter| {
+            limiter
+                .try_acquire_owned()
+                .map_err(|_| anyhow::anyhow!("已建立连接达到上限"))
+        })
+        .transpose()
+}
+
+struct ActivityTracker {
+    sender: watch::Sender<Instant>,
+}
+
+impl ActivityTracker {
+    fn new() -> Self {
+        let (sender, _) = watch::channel(Instant::now());
+        Self { sender }
+    }
+
+    fn mark(&self) {
+        self.sender.send_replace(Instant::now());
+    }
+}
+
+async fn relay_with_idle_timeout<F>(
+    relay: F,
+    idle_timeout: Option<Duration>,
+    activity: &ActivityTracker,
+) -> io::Result<()>
+where
+    F: Future<Output = io::Result<()>>,
+{
+    let Some(idle_timeout) = idle_timeout else {
+        return relay.await;
+    };
+    let mut receiver = activity.sender.subscribe();
+    tokio::pin!(relay);
+
+    loop {
+        let deadline = *receiver.borrow_and_update() + idle_timeout;
+        tokio::select! {
+            result = &mut relay => return result,
+            _ = sleep_until(deadline) => {
+                let idle_for = Instant::now().saturating_duration_since(*receiver.borrow());
+                if idle_for >= idle_timeout {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "转发连接超过空闲超时",
+                    ));
+                }
+            }
+            changed = receiver.changed() => {
+                if changed.is_err() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "转发活动监控意外关闭",
+                    ));
+                }
+            }
+        }
+    }
 }
 
 // =========================================================================
@@ -251,7 +357,11 @@ impl Pipe {
 ///   3. 用 `join!`（而非 `select!`）跑完两个方向，一方 EOF 时仅关闭对端写半边 ——
 ///      正确处理 TCP 半关闭，不截断在途数据。
 #[cfg(target_os = "linux")]
-async fn copy_bidirectional_splice(client: &TcpStream, upstream: &TcpStream) -> io::Result<()> {
+async fn copy_bidirectional_splice(
+    client: &TcpStream,
+    upstream: &TcpStream,
+    activity: &ActivityTracker,
+) -> io::Result<()> {
     use std::net::Shutdown;
     use std::os::fd::AsRawFd;
 
@@ -262,13 +372,29 @@ async fn copy_bidirectional_splice(client: &TcpStream, upstream: &TcpStream) -> 
     let pipe_u2c = Pipe::new()?; // upstream → client
 
     let c2u = async {
-        let r = splice_one_direction(client, client_fd, &pipe_c2u, upstream, upstream_fd).await;
+        let r = splice_one_direction(
+            client,
+            client_fd,
+            &pipe_c2u,
+            upstream,
+            upstream_fd,
+            activity,
+        )
+        .await;
         // client 该方向 EOF：关闭 upstream 写半边，让其得以正常收尾（半关闭）。
         let _ = SockRef::from(upstream).shutdown(Shutdown::Write);
         r
     };
     let u2c = async {
-        let r = splice_one_direction(upstream, upstream_fd, &pipe_u2c, client, client_fd).await;
+        let r = splice_one_direction(
+            upstream,
+            upstream_fd,
+            &pipe_u2c,
+            client,
+            client_fd,
+            activity,
+        )
+        .await;
         let _ = SockRef::from(client).shutdown(Shutdown::Write);
         r
     };
@@ -287,6 +413,7 @@ async fn splice_one_direction(
     pipe: &Pipe,
     dst: &TcpStream,
     dst_fd: std::os::fd::RawFd,
+    activity: &ActivityTracker,
 ) -> io::Result<()> {
     use std::os::fd::AsRawFd;
     use tokio::io::Interest;
@@ -297,28 +424,19 @@ async fn splice_one_direction(
 
     loop {
         // src socket → pipe：等待源可读；splice 返回 EAGAIN 时 async_io 自动清 readiness 并挂起。
-        // 写入端是 pipe，SPLICE_F_MORE 对 pipe 无意义，故 more=false。
         let n = src
-            .async_io(Interest::READABLE, || {
-                splice_raw(src_fd, pipe_w, CHUNK, false)
-            })
+            .async_io(Interest::READABLE, || splice_raw(src_fd, pipe_w, CHUNK))
             .await?;
         if n == 0 {
             return Ok(()); // 源 EOF
         }
+        activity.mark();
 
         // pipe → dst socket：把 pipe 中的 n 字节全部写出。
-        // more = 本轮从源读满了 CHUNK（大概率后续还有数据）→ 给写 socket 附加 SPLICE_F_MORE，
-        // 让内核 cork 聚合成满 MSS 段（YouTube 等大流下行吞吐受益，类比 TCP_CORK/MSG_MORE）；
-        // 未读满（流尾/突发间隙/交互式小流）→ more=false，配合 TCP_NODELAY 立即发出不引入延迟。
-        // EOF 时调用方的 shutdown(Write) 会 flush 任何 cork 残留，内核 200ms cork 定时器亦兜底。
-        let more = n == CHUNK;
         let mut remaining = n;
         while remaining > 0 {
             let written = dst
-                .async_io(Interest::WRITABLE, || {
-                    splice_raw(pipe_r, dst_fd, remaining, more)
-                })
+                .async_io(Interest::WRITABLE, || splice_raw(pipe_r, dst_fd, remaining))
                 .await?;
             if written == 0 {
                 return Err(io::Error::new(
@@ -327,24 +445,63 @@ async fn splice_one_direction(
                 ));
             }
             remaining -= written;
+            activity.mark();
         }
     }
 }
 
+#[cfg(not(target_os = "linux"))]
+async fn copy_bidirectional_buffered(
+    client: &mut TcpStream,
+    upstream: &mut TcpStream,
+    buffer_size: usize,
+    activity: &ActivityTracker,
+) -> io::Result<()> {
+    let (mut client_read, mut client_write) = client.split();
+    let (mut upstream_read, mut upstream_write) = upstream.split();
+    let client_to_upstream =
+        copy_one_direction_buffered(&mut client_read, &mut upstream_write, buffer_size, activity);
+    let upstream_to_client =
+        copy_one_direction_buffered(&mut upstream_read, &mut client_write, buffer_size, activity);
+    tokio::try_join!(client_to_upstream, upstream_to_client).map(|_| ())
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn copy_one_direction_buffered<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    buffer_size: usize,
+    activity: &ActivityTracker,
+) -> io::Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let mut buffer = vec![0_u8; buffer_size];
+    loop {
+        let read = reader.read(&mut buffer).await?;
+        if read == 0 {
+            writer.shutdown().await?;
+            return Ok(());
+        }
+        activity.mark();
+        writer.write_all(&buffer[..read]).await?;
+        activity.mark();
+    }
+}
+
 /// 裸 splice(2) 包装：EAGAIN → `ErrorKind::WouldBlock`（供 `async_io` 识别并挂起，而非空转）。
-/// `more=true` 时附加 `SPLICE_F_MORE`（仅在写入端为 socket 时有意义）：提示内核后续还有数据，
-/// 等同 `TCP_CORK`/`MSG_MORE`，把连续 splice 聚合成满 MSS 段，减少小包、提升大流吞吐。
 #[cfg(target_os = "linux")]
+#[allow(
+    unsafe_code,
+    reason = "splice(2) has no stable standard-library equivalent"
+)]
 fn splice_raw(
     fd_in: std::os::fd::RawFd,
     fd_out: std::os::fd::RawFd,
     len: usize,
-    more: bool,
 ) -> io::Result<usize> {
-    let mut flags = (libc::SPLICE_F_MOVE | libc::SPLICE_F_NONBLOCK) as libc::c_uint;
-    if more {
-        flags |= libc::SPLICE_F_MORE as libc::c_uint;
-    }
+    let flags = (libc::SPLICE_F_MOVE | libc::SPLICE_F_NONBLOCK) as libc::c_uint;
     loop {
         // SAFETY: fd_in/fd_out 由调用方保证有效（来自存活的 TcpStream / Pipe）；
         // 两个 offset 传 null 表示使用各自隐含偏移（socket/pipe 无 seek 偏移）。
@@ -368,5 +525,65 @@ fn splice_raw(
             return Err(err);
         }
         return Ok(ret as usize);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_watchdog_times_out_without_activity() {
+        let activity = ActivityTracker::new();
+        let relay = std::future::pending::<io::Result<()>>();
+        let result = relay_with_idle_timeout(relay, Some(Duration::from_secs(5)), &activity);
+        tokio::pin!(result);
+        tokio::time::advance(Duration::from_secs(6)).await;
+
+        let error = match result.await {
+            Ok(()) => panic!("idle relay unexpectedly completed"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_watchdog_resets_after_activity() {
+        let activity = ActivityTracker::new();
+        let relay = std::future::pending::<io::Result<()>>();
+        let result = relay_with_idle_timeout(relay, Some(Duration::from_secs(5)), &activity);
+        tokio::pin!(result);
+
+        tokio::select! {
+            result = &mut result => panic!("relay completed before idle timeout: {result:?}"),
+            _ = tokio::task::yield_now() => {}
+        }
+        tokio::time::advance(Duration::from_secs(4)).await;
+        activity.mark();
+        tokio::time::advance(Duration::from_secs(4)).await;
+        tokio::select! {
+            result = &mut result => panic!("activity did not reset idle timeout: {result:?}"),
+            _ = tokio::task::yield_now() => {}
+        }
+        tokio::time::advance(Duration::from_secs(2)).await;
+
+        let error = match result.await {
+            Ok(()) => panic!("idle relay unexpectedly completed"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    }
+
+    #[tokio::test]
+    async fn established_limit_rejects_without_waiting() {
+        let limiter = Arc::new(Semaphore::new(1));
+        let held = match Arc::clone(&limiter).acquire_owned().await {
+            Ok(permit) => permit,
+            Err(error) => panic!("failed to acquire test permit: {error}"),
+        };
+
+        assert!(try_acquire_connection(Some(Arc::clone(&limiter))).is_err());
+        drop(held);
+        assert!(try_acquire_connection(Some(limiter)).is_ok());
     }
 }

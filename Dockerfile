@@ -1,34 +1,35 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1@sha256:87999aa3d42bdc6bea60565083ee17e86d1f3339802f543c0d03998580f9cb89
 # =========================================
 # GTAGod Dockerfile - GTACore (Rust) 统一架构
 # 版本: 0.0.1
-# 更新: 2026-06-04
+# 更新: 2026-07-11
 # =========================================
 #
 # 此版本用 GTACore (Rust, gtacore 兼容) 完全替代 gtacore，
-# 原生处理 naive + anytls + anyreality（anyreality 所需 uTLS sidecar 已内嵌）。
+# 原生处理九组合协议（正式七轴 + VLESS Vision REALITY + AmneziaWG）；
+# uTLS、gVisor、WireGuard 与 AmneziaWG sidecar 均内嵌于单文件 gtacore。
 #
 # 架构 (v0.0.1):
 #   - gtagate (Rust): L4 SNI 分流 + ACME 证书申请 (替代 Caddy)
-#   - gtacore (Rust): naive + anytls + anyreality (替代 gtacore)
+#   - gtacore (Rust): 九组合协议，AmneziaWG 使用 userspace packet endpoint
 #
-# 依赖版本 (2026-06-04 更新):
-#   - Rust: 1.96 (edition 2024，需要 rustc >= 1.85)
+# 依赖版本 (2026-07-11 更新):
+#   - Rust: 1.97 (edition 2024)
 #   - gtagate: 本仓库 gateway/ (musl 静态, tokio + rustls + instant-acme)
-#   - gtacore: 预构建 glibc 二进制 bin/gtacore (含内嵌 libutls.so)
+#   - gtacore: 预构建 glibc 二进制 bin/gtacore（内嵌五个协议 sidecar）
 #   - 运行镜像: debian 13-slim (glibc 2.41，满足 gtacore 需求 GLIBC_2.39；代理高吞吞性能优于 musl)
 #
 # =========================================
 
 # 基镜像 tag@digest 内联（不再用 ARG 间接）：使 dependabot 的 docker updater 能解析并自动
 # 跟踪 base image 的 digest 安全更新（ARG 间接它无法解析，旧写法下 dependabot docker 形同虚设）。
-# rust 已在 dependabot.yml 忽略 minor/major（保持 1.96，仅跟同 tag 的 digest）；debian 跟安全补丁
-# （major 升级由人审 PR）。更新 tag 时须同步 digest（docker buildx imagetools inspect rust:1.96-alpine / debian:13-slim）。
+# rust 已在 dependabot.yml 忽略 minor/major（保持 1.97，仅跟同 tag 的 digest）；debian 跟安全补丁
+# （major 升级由人审 PR）。更新 tag 时须同步 digest（docker buildx imagetools inspect rust:1.97-alpine / debian:13-slim）。
 
 # =========================================
 # 构建阶段 1 - gtagate (Rust L4 网关 + ACME)
 # =========================================
-FROM rust:1.96-alpine@sha256:f87aa870663e2b57ec8c69de82c7eedf7383bee987eef7612c0359635eaadb41 AS rust-builder
+FROM rust:1.97-alpine@sha256:ec9c91e77119ce498cd1e87d96d77e0f75b2cee21655a29bc2bf75a51a2b20a4 AS rust-builder
 
 # aws-lc-rs (rustls/instant-acme 默认后端) 需要 C 工具链 + cmake + perl
 RUN apk add --no-cache musl-dev cmake make gcc g++ perl pkgconfig
@@ -40,6 +41,7 @@ WORKDIR /build
 # ⚠️ 不用 dummy-main 依赖预构建层：COPY 真实源码保留的旧 mtime < dummy 产物 mtime → cargo 误判
 # main.rs 未变而跳过重编 → cp 出 dummy 空壳(417KB) → 容器 gtagate 起不来（2026-06-30 实测踩坑）。
 COPY gateway/Cargo.toml gateway/Cargo.lock ./
+COPY gateway/.cargo ./.cargo
 COPY gateway/src ./src
 RUN cargo build --release --locked && \
     cp target/release/gtagate /usr/local/bin/gtagate
@@ -47,15 +49,15 @@ RUN cargo build --release --locked && \
 # 运行阶段 - debian 13-slim (glibc 2.41)
 # gtacore 为 glibc 二进制；debian glibc 在代理高并发/加解密负载下吞吐优于 musl。
 # gtagate 为 musl 静态二进制，可在 glibc 系统直接运行。
-FROM debian:13-slim@sha256:4e401d95de7083948053197a9c3913343cd06b706bf15eb6a0c3ccd26f436a0e
+FROM debian:13-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
 
 # 元数据：镜像语义版本=所打包的 gtacore 版本（单一 source of truth）。
 # CI 从 bin/gtacore 读出真版本并经 --build-arg GTAGOD_VERSION 注入；本地构建用默认值。
 # 更新 bin/gtacore 时须同步此默认值（与 bin/gtacore.sha256、ARG GTACORE_SHA256 一起）。
-ARG GTAGOD_VERSION=0.1.33
+ARG GTAGOD_VERSION=0.2.0
 LABEL maintainer="gtagod" \
     org.opencontainers.image.title="gtagod" \
-    org.opencontainers.image.description="GTAGod - GTACore (Rust, naive + anytls + anyreality) + gtagate L4" \
+    org.opencontainers.image.description="GTAGod - GTACore nine-combination portfolio with AmneziaWG + gtagate L4" \
     org.opencontainers.image.version="${GTAGOD_VERSION}" \
     org.opencontainers.image.licenses="MIT"
 
@@ -95,7 +97,7 @@ COPY --from=rust-builder --chmod=755 /usr/local/bin/gtagate /usr/bin/gtagate
 COPY --chmod=755 bin/gtacore /usr/bin/gtacore
 # gtacore 期望哈希钉进 Dockerfile（构建配方=更强信任锚；攻击者须同时改二进制+本 ARG+.sha256 文件）。
 # 更新 bin/gtacore 时须同步更新此值与 bin/gtacore.sha256。
-ARG GTACORE_SHA256=2241231da3255da24770478db443c1ba0393016673de87082b4f2d4b2e50e323
+ARG GTACORE_SHA256=0e672423dab6d41b7ba4d83f9dd93181d94383c729f8787926979c753828cf75
 COPY bin/gtacore.sha256 /tmp/gtacore.sha256
 RUN set -e; \
     ACTUAL=$(sha256sum /usr/bin/gtacore | awk '{print $1}'); \
@@ -128,8 +130,10 @@ ENV XDG_CONFIG_HOME=/config \
     XDG_DATA_HOME=/data \
     TZ=Asia/Shanghai
 
-# 暴露端口 (gtagate 仅需 443；ACME 采用 DNS-01，无需 80)
-EXPOSE 443
+# 端口元数据（实际部署使用 --net=host）：TLS/SNI 类经 443；Hysteria2、Mieru、
+# AmneziaWG 直连独立端口。AmneziaWG 默认 8450/udp。
+# ACME 采用 DNS-01，无需开放 80。
+EXPOSE 443/tcp 8446/udp 8447/tcp 8447/udp 8450/udp
 
 # 数据卷
 VOLUME ["/config", "/data", "/var/log/caddy", "/etc/gtacore", "/var/log/gtacore"]

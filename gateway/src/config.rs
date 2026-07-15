@@ -28,6 +28,12 @@ pub struct Config {
     /// 最大并发连接数（0 表示不限制）。
     #[serde(default = "default_max_connections")]
     pub max_connections: usize,
+    /// 尚未完成 ClientHello 的最大并发连接数（0 表示不限制）。
+    #[serde(default = "default_max_handshake_connections")]
+    pub max_handshake_connections: usize,
+    /// 已建立转发连接的双向字节空闲超时（秒，0 表示禁用）。
+    #[serde(default = "default_relay_idle_timeout")]
+    pub relay_idle_timeout_secs: u64,
     /// SNI 路由表（来自 JSON）。`sni` 支持精确主机名，或 `*.example.com`
     /// 形式的通配（恰好匹配一层子域名，与泛域名证书语义一致）。
     #[serde(default)]
@@ -68,7 +74,7 @@ pub struct AcmeConfig {
     pub domains: Vec<String>,
     /// 账户联系邮箱。
     pub email: String,
-    /// CA：`letsencrypt` | `letsencrypt-staging` | `zerossl` | `buypass` | 完整 directory URL。
+    /// CA：`letsencrypt` | `letsencrypt-staging`。
     #[serde(default = "default_ca")]
     pub ca: String,
     /// Cloudflare API Token（明文，仅用于测试；生产用 env 或 token_file）。
@@ -96,24 +102,92 @@ impl Config {
         let mut cfg: Config = serde_json::from_str(&raw)
             .map_err(|e| anyhow::anyhow!("解析配置文件 {} 失败: {e}", path.display()))?;
 
-        // 配置校验：防止误配导致 OOM 或全面瘫痪
-        if cfg.copy_buffer_size == 0 {
-            anyhow::bail!("copy_buffer_size 不能为 0");
-        }
-        if cfg.copy_buffer_size > 4 * 1024 * 1024 {
-            anyhow::bail!("copy_buffer_size ({}) 超过上限 4MB", cfg.copy_buffer_size);
-        }
-        if cfg.dispatch_timeout_secs == 0 {
-            anyhow::bail!("dispatch_timeout_secs 不能为 0");
-        }
-        if cfg.upstream_connect_timeout_secs == 0 {
-            anyhow::bail!("upstream_connect_timeout_secs 不能为 0");
-        }
+        cfg.validate()?;
 
         // 预计算路由查找表（精确 + 通配）。
         cfg.build_route_indices();
 
         Ok(cfg)
+    }
+
+    /// 配置校验：防止误配导致 OOM、panic 或全面瘫痪。
+    fn validate(&self) -> anyhow::Result<()> {
+        if self.copy_buffer_size == 0 {
+            anyhow::bail!("copy_buffer_size 不能为 0");
+        }
+        if self.copy_buffer_size > 4 * 1024 * 1024 {
+            anyhow::bail!("copy_buffer_size ({}) 超过上限 4MB", self.copy_buffer_size);
+        }
+        if self.dispatch_timeout_secs == 0 {
+            anyhow::bail!("dispatch_timeout_secs 不能为 0");
+        }
+        if self.upstream_connect_timeout_secs == 0 {
+            anyhow::bail!("upstream_connect_timeout_secs 不能为 0");
+        }
+        if self.max_connections > tokio::sync::Semaphore::MAX_PERMITS {
+            anyhow::bail!(
+                "max_connections ({}) 超过 Tokio Semaphore 上限 {}",
+                self.max_connections,
+                tokio::sync::Semaphore::MAX_PERMITS
+            );
+        }
+        if self.max_handshake_connections > tokio::sync::Semaphore::MAX_PERMITS {
+            anyhow::bail!(
+                "max_handshake_connections ({}) 超过 Tokio Semaphore 上限 {}",
+                self.max_handshake_connections,
+                tokio::sync::Semaphore::MAX_PERMITS
+            );
+        }
+        let mut exact_routes = HashMap::new();
+        let mut wildcard_routes = HashMap::new();
+        for route in &self.routes {
+            let key = route.sni.trim_end_matches('.').to_ascii_lowercase();
+            if key.is_empty() {
+                anyhow::bail!("SNI 路由不能为空");
+            }
+            if route.upstream.trim().is_empty() {
+                anyhow::bail!("SNI 路由 {:?} 的 upstream 不能为空", route.sni);
+            }
+            if let Some(base) = key.strip_prefix("*.") {
+                if base.is_empty() || base.contains('*') {
+                    anyhow::bail!("无效的 SNI 通配路由 {:?}；仅支持 *.example.com", route.sni);
+                }
+                if let Some(previous) = wildcard_routes.insert(base.to_owned(), &route.sni) {
+                    anyhow::bail!(
+                        "SNI 通配路由归一化后重复: {:?} 与 {:?}",
+                        previous,
+                        route.sni
+                    );
+                }
+            } else {
+                if key.contains('*') {
+                    anyhow::bail!(
+                        "无效的 SNI 路由 {:?}；通配符只能使用 *.example.com",
+                        route.sni
+                    );
+                }
+                if let Some(previous) = exact_routes.insert(key, &route.sni) {
+                    anyhow::bail!(
+                        "SNI 精确路由归一化后重复: {:?} 与 {:?}",
+                        previous,
+                        route.sni
+                    );
+                }
+            }
+        }
+        if let Some(acme) = &self.acme
+            && acme.enabled
+            && !matches!(
+                acme.ca.trim().to_ascii_lowercase().as_str(),
+                "letsencrypt" | "le" | "letsencrypt-staging" | "staging"
+            )
+        {
+            anyhow::bail!(
+                "不支持的 ACME CA {:?}；仅支持 letsencrypt 或 letsencrypt-staging",
+                acme.ca
+            );
+        }
+        Ok(())
     }
 
     /// 构建精确/通配路由索引。精确路由进 O(1) HashMap；`*.domain` 通配路由
@@ -195,19 +269,14 @@ impl AcmeConfig {
         )
     }
 
-    /// 将 `ca` 关键字解析为 ACME directory URL。
-    pub fn directory_url(&self) -> String {
+    /// 将已经过 `Config::validate` 的 CA 关键字解析为 ACME directory URL。
+    pub fn directory_url(&self) -> &'static str {
         match self.ca.to_ascii_lowercase().as_str() {
-            "letsencrypt" | "le" => "https://acme-v02.api.letsencrypt.org/directory".to_string(),
+            "letsencrypt" | "le" => "https://acme-v02.api.letsencrypt.org/directory",
             "letsencrypt-staging" | "staging" => {
-                "https://acme-staging-v02.api.letsencrypt.org/directory".to_string()
+                "https://acme-staging-v02.api.letsencrypt.org/directory"
             }
-            "zerossl" => "https://acme.zerossl.com/v2/DV90".to_string(),
-            "buypass" => "https://api.buypass.com/acme/directory".to_string(),
-            other if other.starts_with("http://") || other.starts_with("https://") => {
-                self.ca.clone()
-            }
-            _ => "https://acme-v02.api.letsencrypt.org/directory".to_string(),
+            _ => unreachable!("ACME CA must be validated before use"),
         }
     }
 
@@ -215,8 +284,6 @@ impl AcmeConfig {
     pub fn ca_label(&self) -> &str {
         match self.ca.to_ascii_lowercase().as_str() {
             "letsencrypt-staging" | "staging" => "letsencrypt-staging",
-            "zerossl" => "zerossl",
-            "buypass" => "buypass",
             _ => "letsencrypt",
         }
     }
@@ -236,6 +303,14 @@ fn default_copy_buffer_size() -> usize {
 
 fn default_max_connections() -> usize {
     8192
+}
+
+fn default_max_handshake_connections() -> usize {
+    512
+}
+
+fn default_relay_idle_timeout() -> u64 {
+    300
 }
 
 fn default_true() -> bool {
@@ -359,5 +434,89 @@ mod tests {
             "127.0.0.1:8443"
         );
         assert_eq!(cfg.upstream_for(None), "127.0.0.1:8443");
+    }
+
+    #[test]
+    fn rejects_normalized_duplicate_exact_routes() {
+        let cfg = load_str(
+            r#"{
+            "listen": "0.0.0.0:443",
+            "default_upstream": "127.0.0.1:8443",
+            "routes": [
+                { "sni": "API.Example.com", "upstream": "127.0.0.1:8445" },
+                { "sni": "api.example.com.", "upstream": "127.0.0.1:8448" }
+            ]
+        }"#,
+        );
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_normalized_duplicate_wildcard_routes() {
+        let cfg = load_str(
+            r#"{
+            "listen": "0.0.0.0:443",
+            "default_upstream": "127.0.0.1:8444",
+            "routes": [
+                { "sni": "*.Example.com", "upstream": "127.0.0.1:8443" },
+                { "sni": "*.example.com.", "upstream": "127.0.0.1:8449" }
+            ]
+        }"#,
+        );
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_malformed_wildcard_routes() {
+        for sni in ["*.", "api.*.example.com", "**.example.com"] {
+            let json = format!(
+                r#"{{
+                "listen": "0.0.0.0:443",
+                "default_upstream": "127.0.0.1:8444",
+                "routes": [{{ "sni": "{sni}", "upstream": "127.0.0.1:8443" }}]
+            }}"#
+            );
+            let cfg = load_str(&json);
+            assert!(
+                cfg.validate().is_err(),
+                "accepted malformed SNI route {sni}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_max_connections_above_tokio_limit() {
+        let mut cfg = load_str(COMBO);
+        cfg.max_connections = tokio::sync::Semaphore::MAX_PERMITS + 1;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_handshake_limit_above_tokio_limit() {
+        let mut cfg = load_str(COMBO);
+        cfg.max_handshake_connections = tokio::sync::Semaphore::MAX_PERMITS + 1;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_unsupported_acme_ca_instead_of_falling_back() {
+        let mut cfg = load_str(COMBO);
+        cfg.acme = Some(AcmeConfig {
+            enabled: true,
+            domains: vec!["*.example.com".to_owned()],
+            email: "admin@example.com".to_owned(),
+            ca: "zerossl".to_owned(),
+            cloudflare_api_token: None,
+            cloudflare_api_token_file: Some("/run/secrets/cloudflare".to_owned()),
+            cert_dir: "/data/caddy/certificates".to_owned(),
+            renew_before_days: 30,
+            dns_propagation_secs: 60,
+        });
+
+        let error = match cfg.validate() {
+            Ok(()) => panic!("unsupported ACME CA was accepted"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("不支持的 ACME CA"));
     }
 }

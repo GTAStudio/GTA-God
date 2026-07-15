@@ -505,7 +505,7 @@ async fn load_or_create_account(acme: &AcmeConfig) -> anyhow::Result<Account> {
                 terms_of_service_agreed: true,
                 only_return_existing: false,
             },
-            acme.directory_url(),
+            acme.directory_url().to_owned(),
             None,
         )
         .await
@@ -665,16 +665,51 @@ async fn wait_for_dns_txt(
 }
 
 async fn dns_txt_is_visible(http: &HttpClient, name: &str, expected: &str) -> bool {
+    let mut confirmations = 0;
     for resolver in DNS_JSON_RESOLVERS {
         match query_dns_txt(http, resolver, name).await {
-            Ok(answers) if answers.iter().any(|answer| answer.contains(expected)) => {
-                return true;
-            }
+            Ok(answers) if txt_answers_contain_exact(&answers, expected) => confirmations += 1,
             Ok(_) => {}
             Err(e) => debug!(resolver, record = %name, error = %e, "DNS TXT 查询失败"),
         }
     }
-    false
+    confirmations == DNS_JSON_RESOLVERS.len()
+}
+
+fn txt_answers_contain_exact(answers: &[String], expected: &str) -> bool {
+    answers
+        .iter()
+        .filter_map(|answer| decode_dns_json_txt(answer))
+        .any(|value| value == expected)
+}
+
+fn decode_dns_json_txt(answer: &str) -> Option<String> {
+    let mut remaining = answer.trim();
+    let mut decoded = String::new();
+    while !remaining.is_empty() {
+        remaining = remaining.strip_prefix('"')?;
+        let mut escaped = false;
+        let mut closing_index = None;
+        for (index, character) in remaining.char_indices() {
+            if escaped {
+                decoded.push(character);
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                closing_index = Some(index);
+                break;
+            } else {
+                decoded.push(character);
+            }
+        }
+        if escaped {
+            return None;
+        }
+        let closing_index = closing_index?;
+        remaining = remaining[closing_index + 1..].trim_start();
+    }
+    Some(decoded)
 }
 
 async fn query_dns_txt(
@@ -741,6 +776,27 @@ async fn finalize_and_store(
 mod tests {
     use super::*;
     use time::macros::datetime;
+
+    #[test]
+    fn dns_txt_matching_requires_exact_decoded_token() {
+        let expected = "challenge-token";
+        assert!(txt_answers_contain_exact(
+            &["\"challenge-token\"".to_owned()],
+            expected
+        ));
+        assert!(txt_answers_contain_exact(
+            &["\"challenge-\" \"token\"".to_owned()],
+            expected
+        ));
+        assert!(!txt_answers_contain_exact(
+            &["\"prefix-challenge-token-suffix\"".to_owned()],
+            expected
+        ));
+        assert!(!txt_answers_contain_exact(
+            &["challenge-token".to_owned()],
+            expected
+        ));
+    }
 
     #[test]
     fn parses_retry_after_seconds() {
