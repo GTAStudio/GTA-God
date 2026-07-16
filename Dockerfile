@@ -54,7 +54,7 @@ FROM debian:13-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f4
 # 元数据：镜像语义版本=所打包的 gtacore 版本（单一 source of truth）。
 # CI 从 bin/gtacore 读出真版本并经 --build-arg GTAGOD_VERSION 注入；本地构建用默认值。
 # 更新 bin/gtacore 时须同步此默认值（与 bin/gtacore.sha256、ARG GTACORE_SHA256 一起）。
-ARG GTAGOD_VERSION=0.2.0
+ARG GTAGOD_VERSION=0.2.1
 LABEL maintainer="gtagod" \
     org.opencontainers.image.title="gtagod" \
     org.opencontainers.image.description="GTAGod - GTACore nine-combination portfolio with AmneziaWG + gtagate L4" \
@@ -70,7 +70,6 @@ RUN apt-get update && \
         libcap2-bin \
         netcat-openbsd \
         procps \
-        tini \
         tzdata \
         jq && \
     rm -rf /var/lib/apt/lists/* && \
@@ -97,7 +96,7 @@ COPY --from=rust-builder --chmod=755 /usr/local/bin/gtagate /usr/bin/gtagate
 COPY --chmod=755 bin/gtacore /usr/bin/gtacore
 # gtacore 期望哈希钉进 Dockerfile（构建配方=更强信任锚；攻击者须同时改二进制+本 ARG+.sha256 文件）。
 # 更新 bin/gtacore 时须同步更新此值与 bin/gtacore.sha256。
-ARG GTACORE_SHA256=0e672423dab6d41b7ba4d83f9dd93181d94383c729f8787926979c753828cf75
+ARG GTACORE_SHA256=f9351ed7fe73411fd2da4c1729f72d12c173b5dad364b6613e41b9ee10f7d3d1
 COPY bin/gtacore.sha256 /tmp/gtacore.sha256
 RUN set -e; \
     ACTUAL=$(sha256sum /usr/bin/gtacore | awk '{print $1}'); \
@@ -155,4 +154,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=300s --start-interval=5s
     CMD /usr/local/bin/healthcheck.sh
 
 # 启动命令
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

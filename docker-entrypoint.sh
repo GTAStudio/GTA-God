@@ -312,8 +312,19 @@ GTACORE_RESTART_ATTEMPTS=0
 GTACORE_MAX_RESTART_ATTEMPTS=10
 GTACORE_TOKEN_FILE="${GTACORE_TOKEN_FILE:-/tmp/gtacore-token}"
 GTACORE_MAX_CONNECTIONS=$(_num_or "${GTACORE_MAX_CONNECTIONS:-8192}" 8192)
+GTACORE_DAEMON_PORT=$(_num_or "${GTACORE_DAEMON_PORT:-0}" 0)
+GTACORE_LOG_MAX_SIZE=$(_num_or "${GTACORE_LOG_MAX_SIZE:-10485760}" 10485760)
+if [ "$GTACORE_LOG_MAX_SIZE" -lt 1024 ]; then
+    echo "⚠️  Invalid GTACORE_LOG_MAX_SIZE=${GTACORE_LOG_MAX_SIZE}; falling back to 10485760"
+    GTACORE_LOG_MAX_SIZE=10485760
+fi
+if [ "$GTACORE_DAEMON_PORT" -gt 65535 ]; then
+    echo "⚠️  Invalid GTACORE_DAEMON_PORT=${GTACORE_DAEMON_PORT}; falling back to dynamic port 0"
+    GTACORE_DAEMON_PORT=0
+fi
 
-# gtacore 控制面 (127.0.0.1:19810) 需要 token；仅 loopback，容器不暴露该端口
+# gtacore 控制面始终限制在 loopback；端口 0 由内核动态分配，避免 --net=host
+# 下与并行 GTACore 实例争用固定 19810。需要固定端口时显式设置 GTACORE_DAEMON_PORT。
 ensure_gtacore_token() {
     if [ -s "$GTACORE_TOKEN_FILE" ]; then
         return 0
@@ -330,7 +341,8 @@ ensure_gtacore_log_forwarder() {
         return 0
     fi
 
-    tail -n 0 -f "$GTACORE_LOG_FILE" &
+    # GTACore 会 rename + reopen 轮转日志；-F 按文件名重试，跨轮转继续转发。
+    tail -n 0 -F "$GTACORE_LOG_FILE" &
     LOG_TAIL_PID=$!
 }
 
@@ -413,8 +425,10 @@ start_gtacore() {
     ensure_gtacore_log_forwarder
     # gtacore inbound 与 gtagate 监听均已设 SO_REUSEADDR：--net=host 重建/重启时
     # 即使端口残留 TIME_WAIT 也能立即重绑，无需等待端口释放（消除 ~55s 重启黑屏）。
-    gtacore run --config "$GTACORE_RUNTIME_CONFIG" --token-file "$GTACORE_TOKEN_FILE" \
-        --max-connections "$GTACORE_MAX_CONNECTIONS" >> "$GTACORE_LOG_FILE" 2>&1 &
+    gtacore run --config "$GTACORE_RUNTIME_CONFIG" --host 127.0.0.1 \
+        --port "$GTACORE_DAEMON_PORT" --token-file "$GTACORE_TOKEN_FILE" \
+        --max-connections "$GTACORE_MAX_CONNECTIONS" \
+        --log-file "$GTACORE_LOG_FILE" --log-max-size "$GTACORE_LOG_MAX_SIZE" &
     GTACORE_PID=$!
     echo "✅ gtacore started with PID: $GTACORE_PID"
 
