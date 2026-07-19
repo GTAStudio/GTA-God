@@ -1,0 +1,10 @@
+{
+  "listen": "0.0.0.0:18443",
+  "dispatch_timeout_secs": 3,
+  "upstream_connect_timeout_secs": 3,
+  "max_connections": 64,
+  "max_handshake_connections": 16,
+  "relay_idle_timeout_secs": 30,
+  "default_upstream": "127.0.0.1:65534",
+  "routes": []
+}

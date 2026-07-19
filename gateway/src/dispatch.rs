@@ -8,12 +8,13 @@
 use std::future::Future;
 use std::io;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use socket2::SockRef;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpSocket, TcpStream};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::{Instant, sleep_until, timeout};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -28,9 +29,20 @@ const MAX_CLIENT_HELLO: usize = 16 * 1024;
 /// accept 出现瞬时错误（如 fd 耗尽 EMFILE）时的退避时长，避免 CPU 空转。
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 
+/// 吸收连接突发和 TCP_DEFER_ACCEPT 队列；Linux 会按 net.core.somaxconn 自动封顶。
+const LISTEN_BACKLOG: u32 = 4096;
+
 /// 优雅关闭时等待活跃连接完成的最大时长。
 /// 容器内停机预算受限（entrypoint 8s 看门狗 + Docker 10s grace），故取 5s 让 gtagate 在被 SIGKILL 前干净退出。
 const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Tokio、ACME HTTP 客户端、日志与监听 socket 的保守常驻 FD 余量。
+#[cfg(target_os = "linux")]
+const PROCESS_FD_RESERVE: u64 = 64;
+
+/// Linux relay 每连接使用 client/upstream 两个 socket 与两条 pipe 的四个端点。
+#[cfg(target_os = "linux")]
+const RELAY_FDS_PER_CONNECTION: u64 = 6;
 
 /// 设置 TCP Keepalive：60s 后开始探测，每 15s 一次。检测死连接，避免资源泄漏。
 fn set_tcp_keepalive(stream: &TcpStream) {
@@ -43,6 +55,8 @@ fn set_tcp_keepalive(stream: &TcpStream) {
 
 /// 启动分流器主循环。接收 CancellationToken 以支持优雅退出。
 pub async fn run(cfg: Arc<Config>, cancel: CancellationToken) -> anyhow::Result<()> {
+    validate_process_capacity(&cfg)?;
+
     // SO_REUSEADDR：容器以 --net=host 重启/重建时，旧进程在该端口的连接可能仍处于
     // TIME_WAIT 并残留于宿主网络命名空间；不设置则新进程 bind 会因 EADDRINUSE
     // ("Address already in use") 失败。设置后可立即重新绑定。这是服务端标准实践，
@@ -64,8 +78,12 @@ pub async fn run(cfg: Arc<Config>, cancel: CancellationToken) -> anyhow::Result<
         .bind(addr)
         .map_err(|e| anyhow::anyhow!("绑定监听地址 {} 失败: {e}", cfg.listen))?;
     let listener = socket
-        .listen(1024)
+        .listen(LISTEN_BACKLOG)
         .map_err(|e| anyhow::anyhow!("监听 {} 失败: {e}", cfg.listen))?;
+    #[cfg(target_os = "linux")]
+    if let Err(error) = set_tcp_defer_accept(&listener, cfg.dispatch_timeout_secs) {
+        warn!(%error, "设置 TCP_DEFER_ACCEPT 失败，继续使用普通 accept");
+    }
     info!(
         listen = %cfg.listen,
         max_connections = cfg.max_connections,
@@ -267,17 +285,25 @@ fn try_acquire_connection(
 }
 
 struct ActivityTracker {
-    sender: watch::Sender<Instant>,
+    started: Instant,
+    last_activity_millis: AtomicU64,
 }
 
 impl ActivityTracker {
     fn new() -> Self {
-        let (sender, _) = watch::channel(Instant::now());
-        Self { sender }
+        Self {
+            started: Instant::now(),
+            last_activity_millis: AtomicU64::new(0),
+        }
     }
 
     fn mark(&self) {
-        self.sender.send_replace(Instant::now());
+        let millis = self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        self.last_activity_millis.store(millis, Ordering::Release);
+    }
+
+    fn last_activity(&self) -> Instant {
+        self.started + Duration::from_millis(self.last_activity_millis.load(Ordering::Acquire))
     }
 }
 
@@ -292,15 +318,16 @@ where
     let Some(idle_timeout) = idle_timeout else {
         return relay.await;
     };
-    let mut receiver = activity.sender.subscribe();
     tokio::pin!(relay);
 
     loop {
-        let deadline = *receiver.borrow_and_update() + idle_timeout;
+        let observed_activity = activity.last_activity();
+        let deadline = observed_activity + idle_timeout;
         tokio::select! {
             result = &mut relay => return result,
             _ = sleep_until(deadline) => {
-                let idle_for = Instant::now().saturating_duration_since(*receiver.borrow());
+                let latest_activity = activity.last_activity();
+                let idle_for = Instant::now().saturating_duration_since(latest_activity);
                 if idle_for >= idle_timeout {
                     return Err(io::Error::new(
                         io::ErrorKind::TimedOut,
@@ -308,16 +335,90 @@ where
                     ));
                 }
             }
-            changed = receiver.changed() => {
-                if changed.is_err() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::BrokenPipe,
-                        "转发活动监控意外关闭",
-                    ));
-                }
-            }
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn validate_process_capacity(cfg: &Config) -> anyhow::Result<()> {
+    if cfg.max_connections == 0 || cfg.max_handshake_connections == 0 {
+        warn!(
+            max_connections = cfg.max_connections,
+            max_handshake_connections = cfg.max_handshake_connections,
+            "连接预算包含无限制项，无法验证文件描述符容量"
+        );
+        return Ok(());
+    }
+
+    let required = u64::try_from(cfg.max_connections)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(RELAY_FDS_PER_CONNECTION)
+        .saturating_add(u64::try_from(cfg.max_handshake_connections).unwrap_or(u64::MAX))
+        .saturating_add(PROCESS_FD_RESERVE);
+    let soft_limit = process_nofile_soft_limit()?;
+    if required > soft_limit {
+        let available_for_relays = soft_limit
+            .saturating_sub(PROCESS_FD_RESERVE)
+            .saturating_sub(u64::try_from(cfg.max_handshake_connections).unwrap_or(u64::MAX));
+        let suggested_connections = available_for_relays / RELAY_FDS_PER_CONNECTION;
+        anyhow::bail!(
+            "文件描述符软上限 {soft_limit} 不足：当前连接预算至少需要 {required}；请提高 nofile，或把 max_connections 调到不超过 {suggested_connections}"
+        );
+    }
+    info!(soft_limit, required, "文件描述符容量校验通过");
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[allow(
+    unsafe_code,
+    reason = "getrlimit has no stable standard-library equivalent"
+)]
+fn process_nofile_soft_limit() -> anyhow::Result<u64> {
+    let mut limit = std::mem::MaybeUninit::<libc::rlimit>::uninit();
+    // SAFETY: getrlimit initializes the provided rlimit on success.
+    let result = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, limit.as_mut_ptr()) };
+    if result != 0 {
+        return Err(anyhow::anyhow!(
+            "读取 RLIMIT_NOFILE 失败: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: result == 0 guarantees initialization.
+    let limit = unsafe { limit.assume_init() };
+    Ok(limit.rlim_cur)
+}
+
+#[cfg(target_os = "linux")]
+#[allow(
+    unsafe_code,
+    reason = "TCP_DEFER_ACCEPT has no socket2 or stable standard-library equivalent"
+)]
+fn set_tcp_defer_accept(listener: &tokio::net::TcpListener, timeout_secs: u64) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let seconds = libc::c_int::try_from(timeout_secs).unwrap_or(libc::c_int::MAX);
+    // SAFETY: listener owns a valid TCP socket; seconds points to an initialized c_int whose
+    // size is supplied exactly. The kernel copies the value during this call.
+    let result = unsafe {
+        libc::setsockopt(
+            listener.as_raw_fd(),
+            libc::IPPROTO_TCP,
+            libc::TCP_DEFER_ACCEPT,
+            std::ptr::from_ref(&seconds).cast(),
+            std::mem::size_of_val(&seconds) as libc::socklen_t,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn validate_process_capacity(_cfg: &Config) -> anyhow::Result<()> {
+    Ok(())
 }
 
 // =========================================================================
@@ -418,7 +519,7 @@ async fn splice_one_direction(
     use std::os::fd::AsRawFd;
     use tokio::io::Interest;
 
-    const CHUNK: usize = 65536;
+    const CHUNK: usize = 64 * 1024;
     let pipe_w = pipe.write.as_raw_fd();
     let pipe_r = pipe.read.as_raw_fd();
 
@@ -430,7 +531,6 @@ async fn splice_one_direction(
         if n == 0 {
             return Ok(()); // 源 EOF
         }
-        activity.mark();
 
         // pipe → dst socket：把 pipe 中的 n 字节全部写出。
         let mut remaining = n;

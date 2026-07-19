@@ -1,22 +1,23 @@
 # syntax=docker/dockerfile:1@sha256:87999aa3d42bdc6bea60565083ee17e86d1f3339802f543c0d03998580f9cb89
 # =========================================
 # GTAGod Dockerfile - GTACore (Rust) 统一架构
-# 版本: 0.0.1
-# 更新: 2026-07-11
+# 版本: 0.2.2
+# 更新: 2026-07-18
 # =========================================
 #
 # 此版本用 GTACore (Rust, gtacore 兼容) 完全替代 gtacore，
 # 原生处理九组合协议（正式七轴 + VLESS Vision REALITY + AmneziaWG）；
-# uTLS、gVisor、WireGuard 与 AmneziaWG sidecar 均内嵌于单文件 gtacore。
+# uTLS、WireGuard、AmneziaWG 与 userspace netstack 均为原生 Rust；
+# 单文件 gtacore 只内嵌当前服务器需要的 Cloudflared sidecar。
 #
-# 架构 (v0.0.1):
+# 架构 (v0.2.2):
 #   - gtagate (Rust): L4 SNI 分流 + ACME 证书申请 (替代 Caddy)
 #   - gtacore (Rust): 九组合协议，AmneziaWG 使用 userspace packet endpoint
 #
-# 依赖版本 (2026-07-11 更新):
+# 依赖版本 (2026-07-18 更新):
 #   - Rust: 1.97 (edition 2024)
 #   - gtagate: 本仓库 gateway/ (musl 静态, tokio + rustls + instant-acme)
-#   - gtacore: 预构建 glibc 二进制 bin/gtacore（内嵌五个协议 sidecar）
+#   - gtacore: 预构建 glibc 二进制 bin/gtacore（native uTLS/WireGuard/netstack + 内嵌 Cloudflared）
 #   - 运行镜像: debian 13-slim (glibc 2.41，满足 gtacore 需求 GLIBC_2.39；代理高吞吞性能优于 musl)
 #
 # =========================================
@@ -54,11 +55,13 @@ FROM debian:13-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f4
 # 元数据：镜像语义版本=所打包的 gtacore 版本（单一 source of truth）。
 # CI 从 bin/gtacore 读出真版本并经 --build-arg GTAGOD_VERSION 注入；本地构建用默认值。
 # 更新 bin/gtacore 时须同步此默认值（与 bin/gtacore.sha256、ARG GTACORE_SHA256 一起）。
-ARG GTAGOD_VERSION=0.2.1
+ARG GTAGOD_VERSION=0.2.2
+ARG GTACORE_REVISION=5a6b5b5ac59e7656f5bce7e4098d26d18155aadb
 LABEL maintainer="gtagod" \
     org.opencontainers.image.title="gtagod" \
     org.opencontainers.image.description="GTAGod - GTACore nine-combination portfolio with AmneziaWG + gtagate L4" \
     org.opencontainers.image.version="${GTAGOD_VERSION}" \
+    io.gtagod.gtacore.revision="${GTACORE_REVISION}" \
     org.opencontainers.image.licenses="MIT"
 
 # 一次性安装所有依赖并创建目录，减少镜像层
@@ -94,9 +97,10 @@ RUN groupadd -g 65532 gtagate && \
 # 复制 gtagate (musl 静态, 来自构建阶段) 与 gtacore (本地预构建 glibc 二进制)
 COPY --from=rust-builder --chmod=755 /usr/local/bin/gtagate /usr/bin/gtagate
 COPY --chmod=755 bin/gtacore /usr/bin/gtacore
+COPY --chmod=0444 bin/gtacore.provenance.json /usr/share/gtagod/gtacore.provenance.json
 # gtacore 期望哈希钉进 Dockerfile（构建配方=更强信任锚；攻击者须同时改二进制+本 ARG+.sha256 文件）。
 # 更新 bin/gtacore 时须同步更新此值与 bin/gtacore.sha256。
-ARG GTACORE_SHA256=f9351ed7fe73411fd2da4c1729f72d12c173b5dad364b6613e41b9ee10f7d3d1
+ARG GTACORE_SHA256=e0851535dd69da9d6e3c2deb32d8d382d434c471405f70322b68e7084c8f6a19
 COPY bin/gtacore.sha256 /tmp/gtacore.sha256
 RUN set -e; \
     ACTUAL=$(sha256sum /usr/bin/gtacore | awk '{print $1}'); \
@@ -127,6 +131,7 @@ RUN gtagate --version && \
 # 环境变量
 ENV XDG_CONFIG_HOME=/config \
     XDG_DATA_HOME=/data \
+    GTAGOD_VERSION=${GTAGOD_VERSION} \
     TZ=Asia/Shanghai
 
 # 端口元数据（实际部署使用 --net=host）：TLS/SNI 类经 443；Hysteria2、Mieru、

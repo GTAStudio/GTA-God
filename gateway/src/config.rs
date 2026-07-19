@@ -5,7 +5,8 @@
 //! 指向的文件读取，避免像旧版 `run.sh` 那样把 Token 明文 `sed` 进配置文件。
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
 use std::path::Path;
 
 use serde::Deserialize;
@@ -112,6 +113,8 @@ impl Config {
 
     /// 配置校验：防止误配导致 OOM、panic 或全面瘫痪。
     fn validate(&self) -> anyhow::Result<()> {
+        validate_socket_addr("listen", &self.listen)?;
+        validate_socket_addr("default_upstream", &self.default_upstream)?;
         if self.copy_buffer_size == 0 {
             anyhow::bail!("copy_buffer_size 不能为 0");
         }
@@ -148,6 +151,10 @@ impl Config {
             if route.upstream.trim().is_empty() {
                 anyhow::bail!("SNI 路由 {:?} 的 upstream 不能为空", route.sni);
             }
+            validate_socket_addr(
+                &format!("SNI 路由 {:?} 的 upstream", route.sni),
+                &route.upstream,
+            )?;
             if let Some(base) = key.strip_prefix("*.") {
                 if base.is_empty() || base.contains('*') {
                     anyhow::bail!("无效的 SNI 通配路由 {:?}；仅支持 *.example.com", route.sni);
@@ -177,15 +184,8 @@ impl Config {
         }
         if let Some(acme) = &self.acme
             && acme.enabled
-            && !matches!(
-                acme.ca.trim().to_ascii_lowercase().as_str(),
-                "letsencrypt" | "le" | "letsencrypt-staging" | "staging"
-            )
         {
-            anyhow::bail!(
-                "不支持的 ACME CA {:?}；仅支持 letsencrypt 或 letsencrypt-staging",
-                acme.ca
-            );
+            acme.validate()?;
         }
         Ok(())
     }
@@ -242,6 +242,47 @@ impl Config {
 }
 
 impl AcmeConfig {
+    fn validate(&self) -> anyhow::Result<()> {
+        if self.domains.is_empty() {
+            anyhow::bail!("启用 ACME 时 domains 不能为空");
+        }
+        let mut normalized_domains = HashSet::with_capacity(self.domains.len());
+        for domain in &self.domains {
+            let normalized = normalize_acme_domain(domain)?;
+            if !normalized_domains.insert(normalized) {
+                anyhow::bail!("ACME domains 归一化后重复: {domain:?}");
+            }
+        }
+        let email = self.email.trim();
+        if email.is_empty()
+            || email.contains(char::is_whitespace)
+            || !email
+                .split_once('@')
+                .is_some_and(|(local, domain)| !local.is_empty() && is_valid_dns_name(domain))
+        {
+            anyhow::bail!("ACME email 不是有效联系邮箱: {:?}", self.email);
+        }
+        if !matches!(
+            self.ca.trim().to_ascii_lowercase().as_str(),
+            "letsencrypt" | "le" | "letsencrypt-staging" | "staging"
+        ) {
+            anyhow::bail!(
+                "不支持的 ACME CA {:?}；仅支持 letsencrypt 或 letsencrypt-staging",
+                self.ca
+            );
+        }
+        if self.cert_dir.trim().is_empty() || !Path::new(&self.cert_dir).is_absolute() {
+            anyhow::bail!("ACME cert_dir 必须是非空绝对路径: {:?}", self.cert_dir);
+        }
+        if !(1..=365).contains(&self.renew_before_days) {
+            anyhow::bail!("ACME renew_before_days 必须在 1..=365 之间");
+        }
+        if !(5..=3600).contains(&self.dns_propagation_secs) {
+            anyhow::bail!("ACME dns_propagation_secs 必须在 5..=3600 之间");
+        }
+        Ok(())
+    }
+
     /// 解析最终生效的 Cloudflare API Token：env > 明文字段 > 文件。
     pub fn resolve_token(&self) -> anyhow::Result<String> {
         if let Ok(token) = std::env::var("CLOUDFLARE_API_TOKEN") {
@@ -287,6 +328,42 @@ impl AcmeConfig {
             _ => "letsencrypt",
         }
     }
+}
+
+fn validate_socket_addr(field: &str, value: &str) -> anyhow::Result<SocketAddr> {
+    let trimmed = value.trim();
+    if trimmed != value || trimmed.is_empty() {
+        anyhow::bail!("{field} 必须是无首尾空白的 IP:端口地址: {value:?}");
+    }
+    trimmed
+        .parse::<SocketAddr>()
+        .map_err(|error| anyhow::anyhow!("{field} 不是有效 IP:端口地址 {value:?}: {error}"))
+}
+
+fn normalize_acme_domain(domain: &str) -> anyhow::Result<String> {
+    let normalized = domain.trim().trim_end_matches('.').to_ascii_lowercase();
+    let dns_name = normalized.strip_prefix("*.").unwrap_or(&normalized);
+    if normalized.is_empty()
+        || normalized.contains('*') && !normalized.starts_with("*.")
+        || !is_valid_dns_name(dns_name)
+    {
+        anyhow::bail!("无效的 ACME 域名: {domain:?}");
+    }
+    Ok(normalized)
+}
+
+fn is_valid_dns_name(name: &str) -> bool {
+    name.len() <= 253
+        && name.contains('.')
+        && name.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+        })
 }
 
 fn default_dispatch_timeout() -> u64 {
@@ -518,5 +595,58 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("不支持的 ACME CA"));
+    }
+
+    #[test]
+    fn rejects_invalid_listener_and_upstream_addresses() {
+        for (field, value) in [
+            ("listen", "localhost:443"),
+            ("default_upstream", ""),
+            ("default_upstream", "127.0.0.1"),
+        ] {
+            let mut cfg = load_str(COMBO);
+            match field {
+                "listen" => cfg.listen = value.to_owned(),
+                "default_upstream" => cfg.default_upstream = value.to_owned(),
+                _ => unreachable!(),
+            }
+            assert!(cfg.validate().is_err(), "accepted {field}={value:?}");
+        }
+
+        let mut cfg = load_str(COMBO);
+        cfg.routes[0].upstream = "localhost:8445".to_owned();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_incomplete_acme_contract() {
+        let mut cfg = load_str(COMBO);
+        let mut acme = AcmeConfig {
+            enabled: true,
+            domains: Vec::new(),
+            email: String::new(),
+            ca: "letsencrypt".to_owned(),
+            cloudflare_api_token: None,
+            cloudflare_api_token_file: Some("/run/secrets/cloudflare".to_owned()),
+            cert_dir: "/data/caddy/certificates".to_owned(),
+            renew_before_days: 30,
+            dns_propagation_secs: 60,
+        };
+        cfg.acme = Some(acme.clone());
+        assert!(cfg.validate().is_err());
+
+        acme.domains = vec!["*.example.com".to_owned(), "*.EXAMPLE.com.".to_owned()];
+        acme.email = "admin@example.com".to_owned();
+        cfg.acme = Some(acme.clone());
+        assert!(cfg.validate().is_err());
+
+        acme.domains = vec!["bad_*_domain".to_owned()];
+        cfg.acme = Some(acme.clone());
+        assert!(cfg.validate().is_err());
+
+        acme.domains = vec!["example.com".to_owned()];
+        acme.email = "not-an-email".to_owned();
+        cfg.acme = Some(acme);
+        assert!(cfg.validate().is_err());
     }
 }

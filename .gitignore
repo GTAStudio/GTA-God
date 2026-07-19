@@ -1,49 +1,28 @@
-# =========================================
-# GTAGod Git 忽略配置
-# =========================================
+# Build outputs
+target/
+gateway/target/
+__pycache__/
+*.py[cod]
 
-# =========================================
-# 排除所有文件，然后逐个添加需要的
-# =========================================
-*
+# Editor and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
 
-# =========================================
-# Git 元数据
-# =========================================
-!.gitignore
-!.gitattributes
-!.github/
-!.github/workflows/
-!.github/workflows/docker-build.yml
-
-# =========================================
-# Docker 构建文件
-# =========================================
-!Dockerfile
-!.dockerignore
-!docker-entrypoint.sh
-!healthcheck.sh
-
-# =========================================
-# gtagate 网关源码 + 预构建二进制（白名单，防新文件被 * 静默忽略；不动 gateway/target）
-# =========================================
-!bin/
-!bin/gtacore
-!bin/gtacore.sha256
-!gateway/
-!gateway/src/
-!gateway/src/**
-!gateway/Cargo.toml
-!gateway/Cargo.lock
-!gateway/.cargo/
-!gateway/.cargo/config.toml
-
-# =========================================
-# 敏感文件 (始终忽略)
-# =========================================
+# Local secrets and runtime configuration
+.env
+.env.*
+!.env.example
 gtagod.conf
 MY-CONFIG.md
 caddy/
 singbox/
+
+# Logs and local backups
 *.log
 *.bak
+*.tmp
+*.old

@@ -8,3 +8,5 @@ Dockerfile text eol=lf
 *.json text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
+*.sha256 text eol=lf
+.gitattributes text eol=lf

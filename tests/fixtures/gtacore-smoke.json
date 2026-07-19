@@ -1,0 +1,32 @@
+{
+	"inbounds": [
+		{
+			"type": "vless",
+			"tag": "smoke-vless",
+			"listen": "127.0.0.1",
+			"listen_port": 19081,
+			"users": [
+				{
+					"name": "smoke",
+					"uuid": "11111111-1111-4111-8111-111111111111"
+				}
+			]
+		}
+	],
+	"endpoints": [
+		{
+			"type": "wireguard",
+			"tag": "smoke-wg",
+			"system": false,
+			"address": ["10.99.0.1/24"],
+			"private_key": "WJOzhtNfGaleZ99V2e1EUDv2H1WAT0SVOACM8TLUnXU=",
+			"listen_port": 19082,
+			"peers": [
+				{
+					"public_key": "Mlv99MAFDJ5Ji1bwV41HpGdRwZF6ewssx2Mh0k6Z0mM=",
+					"allowed_ips": ["10.99.0.2/32"]
+				}
+			]
+		}
+	]
+}

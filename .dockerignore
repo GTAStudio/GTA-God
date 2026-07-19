@@ -28,6 +28,8 @@ build-and-push.sh
 # Docs
 README.md
 LICENSE
+# Tests are executed by CI before the release build and are not runtime assets.
+tests/
 # Temp files and backups
 *.tmp
 *.bak

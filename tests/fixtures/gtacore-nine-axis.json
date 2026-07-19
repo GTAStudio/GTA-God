@@ -1,0 +1,226 @@
+{
+  "log": {
+    "level": "warn",
+    "timestamp": true
+  },
+  "inbounds": [
+    {
+      "type": "anytls",
+      "tag": "smoke-anytls",
+      "listen": "127.0.0.1",
+      "listen_port": 19101,
+      "users": [
+        {
+          "name": "smoke",
+          "password": "gtagod-smoke-password"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "server_name": "bench.local",
+        "certificate_path": "__CERT_PATH__",
+        "key_path": "__KEY_PATH__"
+      }
+    },
+    {
+      "type": "anytls",
+      "tag": "smoke-anyreality",
+      "listen": "127.0.0.1",
+      "listen_port": 19102,
+      "users": [
+        {
+          "name": "smoke",
+          "password": "gtagod-smoke-password"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "server_name": "bench.local",
+        "reality": {
+          "enabled": true,
+          "private_key": "iCKhXmGinK6ItEJlD009wObUP0uejrjIJxrQnodzmnk",
+          "short_id": ["deadbeef"],
+          "handshake": {
+            "server": "127.0.0.1",
+            "server_port": 18443
+          }
+        }
+      }
+    },
+    {
+      "type": "hysteria2",
+      "tag": "smoke-hysteria2",
+      "listen": "127.0.0.1",
+      "listen_port": 19103,
+      "up_mbps": 0,
+      "down_mbps": 0,
+      "users": [
+        {
+          "name": "smoke",
+          "password": "gtagod-smoke-password"
+        }
+      ],
+      "obfs": {
+        "type": "salamander",
+        "password": "gtagod-smoke-obfs"
+      },
+      "ignore_client_bandwidth": false,
+      "quic_options": {
+        "idle_timeout": {
+          "secs": 0,
+          "nanos": 0
+        },
+        "keep_alive_period": {
+          "secs": 0,
+          "nanos": 0
+        },
+        "stream_receive_window": 0,
+        "connection_receive_window": 0,
+        "max_concurrent_streams": 0,
+        "initial_packet_size": 0,
+        "disable_path_mtu_discovery": false
+      },
+      "masquerade": null,
+      "bbr_profile": "",
+      "brutal_debug": false,
+      "realm": null,
+      "tls": {
+        "enabled": true,
+        "server_name": "bench.local",
+        "certificate_path": "__CERT_PATH__",
+        "key_path": "__KEY_PATH__"
+      }
+    },
+    {
+      "type": "mieru",
+      "tag": "smoke-mieru-tcp",
+      "listen": "127.0.0.1",
+      "listen_port": 19104,
+      "network": ["tcp"],
+      "users": [
+        {
+          "name": "smoke",
+          "password": "gtagod-smoke-password"
+        }
+      ]
+    },
+    {
+      "type": "mieru",
+      "tag": "smoke-mieru-udp",
+      "listen": "127.0.0.1",
+      "listen_port": 19105,
+      "network": ["udp"],
+      "users": [
+        {
+          "name": "smoke",
+          "password": "gtagod-smoke-password"
+        }
+      ],
+      "mtu": 1400
+    },
+    {
+      "type": "vless",
+      "tag": "smoke-vless-ws",
+      "listen": "127.0.0.1",
+      "listen_port": 19106,
+      "users": [
+        {
+          "name": "smoke",
+          "uuid": "a1b2c3d4-e5f6-4890-abcd-ef1234567890"
+        }
+      ],
+      "transport": {
+        "type": "ws",
+        "path": "/gtagod-smoke"
+      },
+      "tls": {
+        "enabled": true,
+        "server_name": "bench.local",
+        "certificate_path": "__CERT_PATH__",
+        "key_path": "__KEY_PATH__"
+      }
+    },
+    {
+      "type": "naive",
+      "tag": "smoke-naive",
+      "listen": "127.0.0.1",
+      "listen_port": 19107,
+      "users": [
+        {
+          "username": "smoke",
+          "password": "gtagod-smoke-password"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "server_name": "bench.local",
+        "certificate_path": "__CERT_PATH__",
+        "key_path": "__KEY_PATH__"
+      }
+    },
+    {
+      "type": "vless",
+      "tag": "smoke-vless-reality",
+      "listen": "127.0.0.1",
+      "listen_port": 19108,
+      "users": [
+        {
+          "name": "smoke",
+          "uuid": "b1c2d3e4-f5a6-4789-bcde-fa1234567890",
+          "flow": "xtls-rprx-vision"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "server_name": "bench.local",
+        "reality": {
+          "enabled": true,
+          "private_key": "iCKhXmGinK6ItEJlD009wObUP0uejrjIJxrQnodzmnk",
+          "short_id": ["deadbeef"],
+          "handshake": {
+            "server": "127.0.0.1",
+            "server_port": 18443
+          }
+        }
+      }
+    }
+  ],
+  "endpoints": [
+    {
+      "type": "wireguard",
+      "tag": "smoke-amneziawg",
+      "system": false,
+      "address": ["10.77.0.1/32"],
+      "private_key": "OMxJv6TmmbYdBHuR6OJkq0ilHKUbOzxGqYE0aAnh5GM=",
+      "listen_port": 19109,
+      "udp_mapping": "endpoint_independent",
+      "udp_filtering": "address_and_port_dependent",
+      "udp_nat_max": 4096,
+      "peers": [
+        {
+          "public_key": "25+wsPjl7pjEFXIy0hYQE7e3j2iwHN1KfUIDTrUiEnU=",
+          "allowed_ips": ["10.77.0.2/32"]
+        }
+      ],
+      "amnezia": {
+        "s1": 15,
+        "s2": 18,
+        "s3": 20,
+        "s4": 25,
+        "h1": "123456-123500",
+        "h2": "67543-67550",
+        "h3": "123123-123200",
+        "h4": "32345-32350"
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ],
+  "route": {
+    "final": "direct"
+  }
+}

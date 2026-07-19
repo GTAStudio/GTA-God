@@ -1,0 +1,13 @@
+{
+  "schema": "gtagod.gtacore-build.v1",
+  "repository": "https://github.com/GTAStudio/GTACore-Rust.git",
+  "commit": "5a6b5b5ac59e7656f5bce7e4098d26d18155aadb",
+  "version": "0.2.2",
+  "target": "x86_64-unknown-linux-gnu",
+  "rustc": "1.97.0 (2d8144b78 2026-07-07)",
+  "profile": "release",
+  "features": ["embed-sidecars"],
+  "embedded_sidecars": ["cloudflared"],
+  "sha256": "e0851535dd69da9d6e3c2deb32d8d382d434c471405f70322b68e7084c8f6a19",
+  "size": 46632024
+}

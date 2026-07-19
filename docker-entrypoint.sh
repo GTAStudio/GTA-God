@@ -4,8 +4,8 @@
 
 # =========================================
 # GTAGod Docker Entrypoint
-# 版本: 0.0.1
-# 更新: 2026-06-04
+# 版本: 0.2.2
+# 更新: 2026-07-18
 # =========================================
 # 
 # GTACore (Rust) 统一架构:
@@ -20,7 +20,7 @@
 #
 # =========================================
 
-VERSION="0.0.1"
+VERSION="${GTAGOD_VERSION:-0.2.2}"
 GTACORE_MOUNTED_CONFIG="/etc/gtacore/config.json"
 GTACORE_RUNTIME_CONFIG="/tmp/gtacore-config.json"
 GTACORE_LOG_FILE="/var/log/gtacore/gtacore.log"
@@ -176,6 +176,75 @@ fi
 
 enforce_ipv4_only_without_ipv6
 
+validate_gtagate_sni_routes() {
+        local route_errors="/tmp/gtagod-sni-route-errors.$$"
+
+        if ! jq -nr --slurpfile gate "$GTAGATE_CONFIG" --slurpfile core "$GTACORE_RUNTIME_CONFIG" '
+                def normalize_sni:
+                    ascii_downcase | rtrimstr(".");
+                def wildcard_matches($pattern; $sni):
+                    ($pattern | normalize_sni) as $normalized_pattern
+                    | ($sni | normalize_sni | split(".")) as $sni_labels
+                    | if ($normalized_pattern | startswith("*.")) then
+                            ($normalized_pattern[2:] | split(".")) as $base_labels
+                            | ($sni_labels | length) == (($base_labels | length) + 1)
+                                and $sni_labels[1:] == $base_labels
+                        else
+                            false
+                        end;
+                def effective_upstream($config; $sni):
+                    ([$config.routes[]?
+                        | select((.sni | normalize_sni) == ($sni | normalize_sni))
+                        | .upstream] | first)
+                    // ([$config.routes[]?
+                        | select(wildcard_matches(.sni; $sni))
+                        | .upstream] | first)
+                    // $config.default_upstream;
+                def upstream_port($upstream):
+                    try ($upstream | capture(":(?<port>[0-9]+)$").port | tonumber) catch null;
+
+                $gate[0] as $gate_config
+                | (
+                        ($core[0].inbounds[]?
+                            | select(.type == "naive" or .type == "anytls" or .type == "vless")
+                            | select((.listen_port | type) == "number")
+                            | (.tls.server_name? // .tls.reality.handshake.server? // empty) as $sni
+                            | select(($sni | type) == "string" and ($sni | length) > 0)
+                            | (effective_upstream($gate_config; $sni)) as $actual_upstream
+                            | select(upstream_port($actual_upstream) != .listen_port)
+                            | "SNI routing mismatch: inbound=\(.tag // .type) sni=\($sni) actual=\($actual_upstream) expected_port=\(.listen_port)"),
+                        ($core[0].inbounds[]?
+                            | select(.tls.reality.enabled? == true)
+                            | (.tls.server_name? // empty) as $server_name
+                            | (.tls.reality.handshake.server? // empty) as $handshake_server
+                            | select(($server_name | type) == "string" and ($server_name | length) > 0)
+                            | select(($handshake_server | type) == "string" and ($handshake_server | length) > 0)
+                            | select(($server_name | normalize_sni) != ($handshake_server | normalize_sni))
+                            | "REALITY identity mismatch: inbound=\(.tag // .type) server_name=\($server_name) handshake_server=\($handshake_server)")
+                    )
+        ' > "$route_errors"; then
+                echo "❌ Failed to validate gtagate SNI routes against gtacore inbounds" >&2
+                rm -f "$route_errors"
+                return 1
+        fi
+
+        if [ -s "$route_errors" ]; then
+                echo "❌ gtagate SNI routing does not match gtacore inbounds:" >&2
+                while IFS= read -r route_error; do
+                        echo "   $route_error" >&2
+                done < "$route_errors"
+                rm -f "$route_errors"
+                return 1
+        fi
+
+        rm -f "$route_errors"
+        echo "✅ gtagate SNI routes match gtacore inbounds"
+}
+
+if ! validate_gtagate_sni_routes; then
+        exit 1
+fi
+
 # =========================================
 # 检测配置类型 (使用 jq 精确解析 JSON)
 # =========================================
@@ -309,9 +378,17 @@ CERT_WAIT_MAX=$(_num_or "${CERT_WAIT_MAX:-180}" 180)
 CERT_RETRY_INTERVAL=$(_num_or "${CERT_RETRY_INTERVAL:-30}" 30)
 CERT_RETRY_MAX=$(_num_or "${CERT_RETRY_MAX:-10}" 10)
 GTACORE_RESTART_ATTEMPTS=0
-GTACORE_MAX_RESTART_ATTEMPTS=10
+GTACORE_MAX_RESTART_ATTEMPTS=$(_num_or "${GTACORE_MAX_RESTART_ATTEMPTS:-10}" 10)
+GTACORE_STABLE_RESET_SECS=$(_num_or "${GTACORE_STABLE_RESET_SECS:-300}" 300)
+GTACORE_STARTED_AT=""
 GTACORE_TOKEN_FILE="${GTACORE_TOKEN_FILE:-/tmp/gtacore-token}"
 GTACORE_MAX_CONNECTIONS=$(_num_or "${GTACORE_MAX_CONNECTIONS:-8192}" 8192)
+# Native REALITY/TLS keeps half-closed requests alive during a bounded response
+# drain. The 2048/6144 defaults are the smallest validated pair that keeps the
+# 20-worker short-connection gate lossless while retaining three worker units
+# per accepted TCP connection.
+GTACORE_MAX_TCP_CONNECTIONS=$(_num_or "${GTACORE_MAX_TCP_CONNECTIONS:-2048}" 2048)
+GTACORE_MAX_DATA_PLANE_THREADS=$(_num_or "${GTACORE_MAX_DATA_PLANE_THREADS:-6144}" 6144)
 GTACORE_DAEMON_PORT=$(_num_or "${GTACORE_DAEMON_PORT:-0}" 0)
 GTACORE_LOG_MAX_SIZE=$(_num_or "${GTACORE_LOG_MAX_SIZE:-10485760}" 10485760)
 if [ "$GTACORE_LOG_MAX_SIZE" -lt 1024 ]; then
@@ -323,19 +400,46 @@ if [ "$GTACORE_DAEMON_PORT" -gt 65535 ]; then
     GTACORE_DAEMON_PORT=0
 fi
 
+build_gtacore_optional_limit_args() {
+    local run_help="$1"
+    GTACORE_OPTIONAL_LIMIT_ARGS=""
+
+    if printf '%s\n' "$run_help" | grep -Fq -- '--max-tcp-connections'; then
+        GTACORE_OPTIONAL_LIMIT_ARGS="--max-tcp-connections $GTACORE_MAX_TCP_CONNECTIONS"
+    else
+        echo "ℹ️  Bundled gtacore does not support --max-tcp-connections; using its built-in data-plane limit"
+    fi
+    if printf '%s\n' "$run_help" | grep -Fq -- '--max-data-plane-threads'; then
+        GTACORE_OPTIONAL_LIMIT_ARGS="${GTACORE_OPTIONAL_LIMIT_ARGS:+$GTACORE_OPTIONAL_LIMIT_ARGS }--max-data-plane-threads $GTACORE_MAX_DATA_PLANE_THREADS"
+    else
+        echo "ℹ️  Bundled gtacore does not support --max-data-plane-threads; using its built-in thread limit"
+    fi
+}
+
+if GTACORE_RUN_HELP=$(gtacore run --help 2>&1); then
+    build_gtacore_optional_limit_args "$GTACORE_RUN_HELP"
+else
+    echo "⚠️  Could not inspect gtacore run options; starting without optional data-plane limits"
+    GTACORE_OPTIONAL_LIMIT_ARGS=""
+fi
+
 # gtacore 控制面始终限制在 loopback；端口 0 由内核动态分配，避免 --net=host
 # 下与并行 GTACore 实例争用固定 19810。需要固定端口时显式设置 GTACORE_DAEMON_PORT。
 ensure_gtacore_token() {
     if [ -s "$GTACORE_TOKEN_FILE" ]; then
         return 0
     fi
-    head -c 32 /dev/urandom | base64 | tr -d '\n' > "$GTACORE_TOKEN_FILE"
-    chmod 600 "$GTACORE_TOKEN_FILE"
+    if ! head -c 32 /dev/urandom | base64 | tr -d '\n' > "$GTACORE_TOKEN_FILE"; then
+        echo "❌ Failed to create gtacore control token"
+        rm -f "$GTACORE_TOKEN_FILE"
+        return 1
+    fi
+    chmod 600 "$GTACORE_TOKEN_FILE" || return 1
 }
 
 ensure_gtacore_log_forwarder() {
-    mkdir -p /var/log/gtacore
-    touch "$GTACORE_LOG_FILE"
+    mkdir -p /var/log/gtacore || return 1
+    touch "$GTACORE_LOG_FILE" || return 1
 
     if [ -n "$LOG_TAIL_PID" ] && kill -0 "$LOG_TAIL_PID" 2>/dev/null; then
         return 0
@@ -344,19 +448,28 @@ ensure_gtacore_log_forwarder() {
     # GTACore 会 rename + reopen 轮转日志；-F 按文件名重试，跨轮转继续转发。
     tail -n 0 -F "$GTACORE_LOG_FILE" &
     LOG_TAIL_PID=$!
+    isleep 1
+    if ! kill -0 "$LOG_TAIL_PID" 2>/dev/null; then
+        wait "$LOG_TAIL_PID" 2>/dev/null || true
+        LOG_TAIL_PID=""
+        echo "❌ Failed to start gtacore log forwarder"
+        return 1
+    fi
 }
 
 stop_gtacore() {
-    if [ -n "$GTACORE_PID" ] && kill -0 "$GTACORE_PID" 2>/dev/null; then
-        kill -TERM "$GTACORE_PID" 2>/dev/null
-        _stop_timeout=10
-        while [ $_stop_timeout -gt 0 ] && kill -0 "$GTACORE_PID" 2>/dev/null; do
-            isleep 1
-            _stop_timeout=$((_stop_timeout - 1))
-        done
+    if [ -n "$GTACORE_PID" ]; then
         if kill -0 "$GTACORE_PID" 2>/dev/null; then
-            echo "⚠️  gtacore did not stop within 10s, force killing PID $GTACORE_PID..."
-            kill -9 "$GTACORE_PID" 2>/dev/null
+            kill -TERM "$GTACORE_PID" 2>/dev/null
+            _stop_timeout=10
+            while [ $_stop_timeout -gt 0 ] && kill -0 "$GTACORE_PID" 2>/dev/null; do
+                isleep 1
+                _stop_timeout=$((_stop_timeout - 1))
+            done
+            if kill -0 "$GTACORE_PID" 2>/dev/null; then
+                echo "⚠️  gtacore did not stop within 10s, force killing PID $GTACORE_PID..."
+                kill -9 "$GTACORE_PID" 2>/dev/null
+            fi
         fi
         wait "$GTACORE_PID" 2>/dev/null || true
     fi
@@ -372,9 +485,7 @@ reload_gtacore() {
 
     stop_gtacore
     isleep 1
-    start_gtacore
-
-    if [ -n "$GTACORE_PID" ] && kill -0 "$GTACORE_PID" 2>/dev/null; then
+    if start_gtacore; then
         echo "✅ gtacore reloaded (restarted) successfully"
         return 0
     fi
@@ -417,24 +528,25 @@ start_gtacore() {
     echo "🚀 Starting gtacore..."
 
     if ! validate_gtacore_config; then
-        echo "❌ Fatal: gtacore config is invalid or unreadable; exiting instead of running a degraded container"
-        exit 1
+        echo "❌ gtacore config is invalid or unreadable"
+        return 1
     fi
 
-    ensure_gtacore_token
-    ensure_gtacore_log_forwarder
+    ensure_gtacore_token || return 1
+    ensure_gtacore_log_forwarder || return 1
     # gtacore inbound 与 gtagate 监听均已设 SO_REUSEADDR：--net=host 重建/重启时
     # 即使端口残留 TIME_WAIT 也能立即重绑，无需等待端口释放（消除 ~55s 重启黑屏）。
     gtacore run --config "$GTACORE_RUNTIME_CONFIG" --host 127.0.0.1 \
         --port "$GTACORE_DAEMON_PORT" --token-file "$GTACORE_TOKEN_FILE" \
         --max-connections "$GTACORE_MAX_CONNECTIONS" \
+        $GTACORE_OPTIONAL_LIMIT_ARGS \
         --log-file "$GTACORE_LOG_FILE" --log-max-size "$GTACORE_LOG_MAX_SIZE" &
     GTACORE_PID=$!
     echo "✅ gtacore started with PID: $GTACORE_PID"
 
     isleep 3
     if kill -0 "$GTACORE_PID" 2>/dev/null; then
-        GTACORE_RESTART_ATTEMPTS=0
+        GTACORE_STARTED_AT=$(date +%s)
         touch /tmp/gtagod-gtacore-started
         echo "✅ gtacore is running successfully!"
         
@@ -463,36 +575,34 @@ start_gtacore() {
         if [ "$HAS_AMNEZIAWG" = "true" ]; then
             echo "   📦 AmneziaWG userspace endpoint: enabled"
         fi
+        return 0
     else
         echo "❌ gtacore failed to start! Logs:"
         tail -30 "$GTACORE_LOG_FILE" 2>/dev/null || echo "No log file"
         stop_gtacore
-        echo ""
-        if [ -f /tmp/gtagod-gtacore-required ]; then
-            echo "❌ Fatal: gtacore is required for configured inbounds/endpoints; exiting instead of running a degraded container"
-            exit 1
-        fi
-        echo "⚠️  Continuing with gtagate only..."
+        return 1
     fi
+}
+
+start_gtacore_initial() {
+    if start_gtacore; then
+        return 0
+    fi
+    echo ""
+    if [ -f /tmp/gtagod-gtacore-required ]; then
+        echo "❌ Fatal: gtacore is required for configured inbounds/endpoints"
+        exit 1
+    fi
+    echo "⚠️  Continuing with gtagate only..."
+    return 0
 }
 
 if [ "$NEEDS_CERT" = "true" ]; then
     echo ""
     echo "🔍 Waiting for SSL certificates..."
-    
-    # 提取域名信息 (使用 jq 精确解析)
-    DOMAIN=$(jq -r '[.inbounds[]? | .tls?.server_name // empty] | first // empty' "$GTACORE_RUNTIME_CONFIG" 2>/dev/null)
-    # 优先用 gtagate 配置里 ACME 申请的权威域名（去掉通配前缀 *.）作为证书根域名，
-    # 避免用 awk -F. 取末两段在多级 TLD（如 foo.co.uk → 误得 co.uk）上猜错。
-    ROOT_DOMAIN=$(jq -r '.acme.domains[0]? // empty' "$GTAGATE_CONFIG" 2>/dev/null | sed 's/^\*\.//')
-    if [ -z "$ROOT_DOMAIN" ]; then
-        ROOT_DOMAIN=$(echo "$DOMAIN" | awk -F. '{if(NF>=2) print $(NF-1)"."$NF; else print $0}')
-    fi
-    if [ -z "$ROOT_DOMAIN" ]; then
-        ROOT_DOMAIN="example.com"
-    fi
+
     ACME_CERT_DIR=$(jq -r '.acme.cert_dir // "/data/caddy/certificates"' "$GTAGATE_CONFIG" 2>/dev/null)
-    ACME_DOMAIN=$(jq -r '.acme.domains[0]? // empty' "$GTAGATE_CONFIG" 2>/dev/null)
+    ACME_DOMAINS=$(jq -r '.acme.domains[]?' "$GTAGATE_CONFIG" 2>/dev/null)
     ACME_CA=$(jq -r '.acme.ca // "letsencrypt"' "$GTAGATE_CONFIG" 2>/dev/null | tr '[:upper:]' '[:lower:]')
     case "$ACME_CA" in
         letsencrypt-staging|staging) ACME_CA_LABEL="letsencrypt-staging" ;;
@@ -502,16 +612,25 @@ if [ "$NEEDS_CERT" = "true" ]; then
             exit 1
             ;;
     esac
-    case "$ACME_DOMAIN" in
-        \*.*) ACME_CERT_LABEL="wildcard_.${ACME_DOMAIN#*.}" ;;
-        *) ACME_CERT_LABEL="$ACME_DOMAIN" ;;
-    esac
-    echo "📋 Domain: $DOMAIN (root: $ROOT_DOMAIN)"
+    if [ -z "$ACME_DOMAINS" ]; then
+        echo "❌ ACME domains is empty while TLS certificates are required"
+        exit 1
+    fi
+
+    certificate_label() {
+        case "$1" in
+            \*.*) printf 'wildcard_.%s\n' "${1#*.}" ;;
+            *) printf '%s\n' "$1" ;;
+        esac
+    }
 
     find_active_certificate() {
-        [ -n "$ACME_CERT_LABEL" ] || return 1
+        local domain="$1"
+        local cert_label
+        cert_label=$(certificate_label "$domain") || return 1
+        [ -n "$cert_label" ] || return 1
 
-        local cert_dir="$ACME_CERT_DIR/$ACME_CA_LABEL/$ACME_CERT_LABEL"
+        local cert_dir="$ACME_CERT_DIR/$ACME_CA_LABEL/$cert_label"
         local current_file="$cert_dir/.gtagate-current"
         [ -f "$current_file" ] || return 1
 
@@ -525,8 +644,8 @@ if [ "$NEEDS_CERT" = "true" ]; then
         local resolved_cert
         local resolved_key
         resolved_dir=$(readlink -f "$generation_dir" 2>/dev/null) || return 1
-        resolved_cert=$(readlink -f "$generation_dir/$ACME_CERT_LABEL.crt" 2>/dev/null) || return 1
-        resolved_key=$(readlink -f "$generation_dir/$ACME_CERT_LABEL.key" 2>/dev/null) || return 1
+        resolved_cert=$(readlink -f "$generation_dir/$cert_label.crt" 2>/dev/null) || return 1
+        resolved_key=$(readlink -f "$generation_dir/$cert_label.key" 2>/dev/null) || return 1
         case "$resolved_cert" in "$resolved_dir"/*) ;; *) return 1 ;; esac
         case "$resolved_key" in "$resolved_dir"/*) ;; *) return 1 ;; esac
         [ -f "$resolved_cert" ] && [ -f "$resolved_key" ] || return 1
@@ -536,42 +655,146 @@ if [ "$NEEDS_CERT" = "true" ]; then
 
     # 优先使用 gtagate 已提交的 current generation；再兼容旧 Caddy 布局。
     find_certificate() {
+        local domain="$1"
+        local cert_label
         local cert=""
-        local cert_list
-        cert=$(find_active_certificate)
+        cert_label=$(certificate_label "$domain") || return 1
+        cert=$(find_active_certificate "$domain")
         if [ -n "$cert" ] && [ -f "$cert" ]; then
             printf '%s\n' "$cert"
             return 0
         fi
 
-        cert_list=$(find "$ACME_CERT_DIR" -name "*.crt" -type f ! -path "*/.gtagate-generations/*" 2>/dev/null)
-        [ -z "$cert_list" ] && return 1
+        cert=$(find "$ACME_CERT_DIR" -path "*/$cert_label/$cert_label.crt" \
+            -type f ! -path "*/.gtagate-generations/*" 2>/dev/null | head -1)
+        [ -n "$cert" ] && [ -f "$cert" ] && [ -f "${cert%.crt}.key" ] || return 1
+        printf '%s\n' "$cert"
+    }
 
-        # 策略1: 通配符证书 wildcard_*.domain.com (最常见)
-        cert=$(printf '%s\n' "$cert_list" | grep -F "/wildcard_.${ROOT_DOMAIN}/" | head -1)
-        if [ -n "$cert" ] && [ -f "$cert" ]; then echo "$cert"; return 0; fi
+    acme_domain_for_server_name() {
+        local server_name
+        local candidate
+        local candidate_lower
+        local base
+        local suffix
+        local prefix
+        server_name=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed 's/\.$//')
 
-        # 策略2: 完整域名证书 subdomain.domain.com
-        if [ -n "$DOMAIN" ]; then
-            cert=$(printf '%s\n' "$cert_list" | grep -F "/${DOMAIN}/" | head -1)
-            if [ -n "$cert" ] && [ -f "$cert" ]; then echo "$cert"; return 0; fi
+        for candidate in $ACME_DOMAINS; do
+            candidate_lower=$(printf '%s' "$candidate" | tr '[:upper:]' '[:lower:]' | sed 's/\.$//')
+            case "$candidate_lower" in
+                \*.*)
+                    base=${candidate_lower#*.}
+                    suffix=".$base"
+                    case "$server_name" in
+                        *"$suffix")
+                            prefix=${server_name%"$suffix"}
+                            case "$prefix" in
+                                ""|*.*) ;;
+                                *) printf '%s\n' "$candidate"; return 0 ;;
+                            esac
+                            ;;
+                    esac
+                    ;;
+                *)
+                    if [ "$server_name" = "$candidate_lower" ]; then
+                        printf '%s\n' "$candidate"
+                        return 0
+                    fi
+                    ;;
+            esac
+        done
+
+        # 兼容只有一个 ACME 域名、旧配置未写 tls.server_name 的情形。
+        if [ -z "$server_name" ] && [ "$(printf '%s\n' "$ACME_DOMAINS" | wc -l)" -eq 1 ]; then
+            printf '%s\n' "$ACME_DOMAINS"
+            return 0
         fi
-
-        # 策略3: 根域名证书 domain.com
-        cert=$(printf '%s\n' "$cert_list" | grep -F "/${ROOT_DOMAIN}/" | head -1)
-        if [ -n "$cert" ] && [ -f "$cert" ]; then echo "$cert"; return 0; fi
-
-        # 策略4: 任意包含根域名的证书
-        cert=$(printf '%s\n' "$cert_list" | grep -Fi "$ROOT_DOMAIN" | head -1)
-        if [ -n "$cert" ] && [ -f "$cert" ]; then echo "$cert"; return 0; fi
-
         return 1
     }
 
+    validate_tls_domain_coverage() {
+        local entries="/tmp/gtagod-tls-domain-coverage.$$"
+        if ! jq -r '
+            .inbounds | to_entries[]
+            | select(.value.tls?.certificate_path != null)
+            | [.key, (.value.tag // ("inbound[" + (.key | tostring) + "]")), (.value.tls.server_name // "")]
+            | @tsv
+        ' "$GTACORE_RUNTIME_CONFIG" > "$entries"; then
+            rm -f "$entries"
+            return 1
+        fi
+        while IFS="$(printf '\t')" read -r _index inbound_tag server_name; do
+            if ! acme_domain_for_server_name "$server_name" >/dev/null; then
+                echo "❌ TLS inbound $inbound_tag server_name=${server_name:-<empty>} is not covered by ACME domains" >&2
+                rm -f "$entries"
+                return 1
+            fi
+        done < "$entries"
+        rm -f "$entries"
+    }
+
+    build_certificate_map() {
+        local tls_entries="/tmp/gtagod-tls-entries.$$"
+        local map_entries="/tmp/gtagod-cert-map.$$"
+        if ! jq -r '
+            .inbounds | to_entries[]
+            | select(.value.tls?.certificate_path != null)
+            | [.key, (.value.tag // ("inbound[" + (.key | tostring) + "]")), (.value.tls.server_name // "")]
+            | @tsv
+        ' "$GTACORE_RUNTIME_CONFIG" > "$tls_entries"; then
+            rm -f "$tls_entries" "$map_entries"
+            return 1
+        fi
+        : > "$map_entries" || return 1
+        while IFS="$(printf '\t')" read -r index inbound_tag server_name; do
+            local domain
+            local cert
+            local key
+            domain=$(acme_domain_for_server_name "$server_name") || {
+                echo "TLS inbound $inbound_tag has no matching ACME domain" >&2
+                rm -f "$tls_entries" "$map_entries"
+                return 1
+            }
+            cert=$(find_certificate "$domain") || {
+                echo "certificate for ACME domain $domain is not ready" >&2
+                rm -f "$tls_entries" "$map_entries"
+                return 1
+            }
+            key="${cert%.crt}.key"
+            [ -f "$cert" ] && [ -f "$key" ] || {
+                rm -f "$tls_entries" "$map_entries"
+                return 1
+            }
+            jq -cn --arg index "$index" --arg cert "$cert" --arg key "$key" \
+                '{key: $index, value: {cert: $cert, key: $key}}' >> "$map_entries" || {
+                rm -f "$tls_entries" "$map_entries"
+                return 1
+            }
+        done < "$tls_entries"
+        jq -cs 'from_entries' "$map_entries"
+        local result=$?
+        rm -f "$tls_entries" "$map_entries"
+        return "$result"
+    }
+
     update_cert_paths() {
-        echo "🔧 Updating gtacore config with certificate paths..."
-        if ! jq --arg cert "$ACTUAL_CERT" --arg key "$ACTUAL_KEY" \
-            '(.inbounds[] | select(.tls?.certificate_path != null) | .tls) |= (.certificate_path = $cert | .key_path = $key)' \
+        local cert_map="$1"
+        echo "🔧 Updating gtacore config with per-inbound certificate paths..."
+        if ! jq --argjson certs "$cert_map" '
+            .inbounds |= (
+                to_entries
+                | map(
+                    if .value.tls?.certificate_path != null then
+                        .key as $index
+                        | ($certs[($index | tostring)] // error("missing certificate mapping for inbound index \($index)")) as $pair
+                        | .value.tls.certificate_path = $pair.cert
+                        | .value.tls.key_path = $pair.key
+                    else . end
+                )
+                | map(.value)
+            )
+        ' \
             "$GTACORE_RUNTIME_CONFIG" > "${GTACORE_RUNTIME_CONFIG}.tmp"; then
             echo "❌ Failed to update certificate paths with jq"
             rm -f "${GTACORE_RUNTIME_CONFIG}.tmp"
@@ -582,46 +805,47 @@ if [ "$NEEDS_CERT" = "true" ]; then
             return 1
         fi
         chmod 0600 "$GTACORE_RUNTIME_CONFIG" 2>/dev/null || true
-        echo "✅ Certificate paths updated: $ACTUAL_CERT"
+        echo "✅ Certificate paths updated for all TLS inbounds"
     }
-    
+
+    certificate_map_state() {
+        local cert_map="$1"
+        printf '%s\n' "$cert_map" | jq -r 'to_entries[].value | .cert, .key' \
+            | sort -u \
+            | while IFS= read -r path; do
+                [ -f "$path" ] || return 1
+                stat -c '%n|%Y|%s' "$path" 2>/dev/null || return 1
+            done
+    }
+
+    if ! validate_tls_domain_coverage; then
+        exit 1
+    fi
+
     # 等待证书
     WAIT_COUNT=0
     MAX_WAIT=${CERT_WAIT_MAX}
     CERT_FOUND=false
-    
+
     # 首先检查是否已有证书
-    echo "🔍 Checking for existing certificates..."
-    ACTUAL_CERT=$(find_certificate)
-    if [ -n "$ACTUAL_CERT" ] && [ -f "$ACTUAL_CERT" ]; then
-        ACTUAL_KEY="${ACTUAL_CERT%.crt}.key"
-        if [ -f "$ACTUAL_KEY" ]; then
-            echo "✅ Found existing certificate: $ACTUAL_CERT"
-            echo "✅ Found existing key: $ACTUAL_KEY"
-            CERT_FOUND=true
-        fi
+    echo "🔍 Checking for all required certificates..."
+    CURRENT_CERT_MAP=$(build_certificate_map 2>/dev/null) || CURRENT_CERT_MAP=""
+    if [ -n "$CURRENT_CERT_MAP" ]; then
+        CERT_FOUND=true
     fi
-    
+
     if [ "$CERT_FOUND" = "false" ]; then
-        echo "⏳ No existing cert found, waiting for gtagate to request certificate..."
+        echo "⏳ At least one certificate is missing; waiting for gtagate..."
         isleep 10
         WAIT_COUNT=10
     fi
-    
+
     while [ "$CERT_FOUND" = "false" ] && [ $WAIT_COUNT -lt $MAX_WAIT ]; do
-        ACTUAL_CERT=$(find_certificate)
-        if [ -n "$ACTUAL_CERT" ] && [ -f "$ACTUAL_CERT" ]; then
-            ACTUAL_KEY="${ACTUAL_CERT%.crt}.key"
-            
-            if [ -f "$ACTUAL_KEY" ]; then
-                echo "✅ Found certificate: $ACTUAL_CERT"
-                echo "✅ Found key: $ACTUAL_KEY"
-                CERT_FOUND=true
-            else
-                echo "⚠️  Certificate found but key missing: $ACTUAL_KEY"
-            fi
+        CURRENT_CERT_MAP=$(build_certificate_map 2>/dev/null) || CURRENT_CERT_MAP=""
+        if [ -n "$CURRENT_CERT_MAP" ]; then
+            CERT_FOUND=true
         fi
-        
+
         if [ "$CERT_FOUND" = "false" ]; then
             # 检查 gtagate 是否仍然存活（若已崩溃则证书永远不会到达）
             if ! kill -0 "$GATE_PID" 2>/dev/null; then
@@ -636,13 +860,14 @@ if [ "$NEEDS_CERT" = "true" ]; then
             fi
         fi
     done
-    
+
     if [ "$CERT_FOUND" = "true" ]; then
-        if ! update_cert_paths; then
+        if ! update_cert_paths "$CURRENT_CERT_MAP"; then
             echo "❌ Fatal: failed to update certificate paths"
             exit 1
         fi
-        start_gtacore
+        CERT_STATE=$(certificate_map_state "$CURRENT_CERT_MAP") || exit 1
+        start_gtacore_initial
     else
         echo "⚠️  Timeout waiting for certificate after ${MAX_WAIT}s"
         echo "🔁 Auto-retry is enabled (interval: ${CERT_RETRY_INTERVAL}s, max: ${CERT_RETRY_MAX})"
@@ -662,20 +887,17 @@ if [ "$NEEDS_CERT" = "true" ]; then
             isleep "$CERT_RETRY_INTERVAL"
             RETRY_COUNT=$((RETRY_COUNT + 1))
 
-            ACTUAL_CERT=$(find_certificate)
-            if [ -n "$ACTUAL_CERT" ] && [ -f "$ACTUAL_CERT" ]; then
-                ACTUAL_KEY="${ACTUAL_CERT%.crt}.key"
-                if [ -f "$ACTUAL_KEY" ]; then
-                    echo "✅ Found certificate on retry #${RETRY_COUNT}: $ACTUAL_CERT"
-                    echo "✅ Found key: $ACTUAL_KEY"
-                    CERT_FOUND=true
-                    if ! update_cert_paths; then
-                        echo "❌ Fatal: failed to update certificate paths"
-                        exit 1
-                    fi
-                    start_gtacore
-                    break
+            CURRENT_CERT_MAP=$(build_certificate_map 2>/dev/null) || CURRENT_CERT_MAP=""
+            if [ -n "$CURRENT_CERT_MAP" ]; then
+                echo "✅ Found all certificates on retry #${RETRY_COUNT}"
+                CERT_FOUND=true
+                if ! update_cert_paths "$CURRENT_CERT_MAP"; then
+                    echo "❌ Fatal: failed to update certificate paths"
+                    exit 1
                 fi
+                CERT_STATE=$(certificate_map_state "$CURRENT_CERT_MAP") || exit 1
+                start_gtacore_initial
+                break
             fi
 
             if [ $((RETRY_COUNT % 5)) -eq 0 ]; then
@@ -684,7 +906,7 @@ if [ "$NEEDS_CERT" = "true" ]; then
         done
     fi
 else
-    start_gtacore
+    start_gtacore_initial
 fi
 
 echo ""
@@ -706,15 +928,10 @@ echo "========================================="
 #   3. 证书文件是否更新（自动重载 gtacore）
 # =========================================
 
-CERT_MTIME=""
 # 证书热重载失败计数（有界重试）：reload 成功清零；连续失败达上限则放弃本次更新以防风暴。
 CERT_RELOAD_FAILS=0
 CERT_RELOAD_MAX_FAILS=3
-REJECTED_CERT=""
-REJECTED_MTIME=""
-if [ "$NEEDS_CERT" = "true" ] && [ -n "$ACTUAL_CERT" ] && [ -f "$ACTUAL_CERT" ]; then
-    CERT_MTIME=$(stat -c %Y "$ACTUAL_CERT" 2>/dev/null || stat -f %m "$ACTUAL_CERT" 2>/dev/null || echo "")
-fi
+REJECTED_CERT_STATE=""
 
 while true; do
     # 检查 gtagate 是否存活
@@ -724,80 +941,85 @@ while true; do
         exit 1
     fi
 
-    # 检查 gtacore 是否存活（如果之前成功启动过）
-    if [ -n "$GTACORE_PID" ] && ! kill -0 "$GTACORE_PID" 2>/dev/null; then
+    # 检查 gtacore 是否存活（只要曾成功启动，就持续按有界退避恢复）。
+    if [ -f /tmp/gtagod-gtacore-started ] \
+        && { [ -z "$GTACORE_PID" ] || ! kill -0 "$GTACORE_PID" 2>/dev/null; }; then
+        if [ -n "$GTACORE_PID" ]; then
+            wait "$GTACORE_PID" 2>/dev/null || true
+            GTACORE_PID=""
+        fi
         GTACORE_RESTART_ATTEMPTS=$((GTACORE_RESTART_ATTEMPTS + 1))
         if [ "$GTACORE_RESTART_ATTEMPTS" -gt "$GTACORE_MAX_RESTART_ATTEMPTS" ]; then
             echo "❌ gtacore exceeded max restart attempts ($GTACORE_MAX_RESTART_ATTEMPTS), exiting container..."
             exit 1
         fi
         RESTART_DELAY=$(get_gtacore_restart_delay "$GTACORE_RESTART_ATTEMPTS")
-        echo "⚠️  gtacore (PID $GTACORE_PID) has exited, attempting restart #${GTACORE_RESTART_ATTEMPTS}/${GTACORE_MAX_RESTART_ATTEMPTS} after ${RESTART_DELAY}s..."
+        echo "⚠️  gtacore has exited, attempting restart #${GTACORE_RESTART_ATTEMPTS}/${GTACORE_MAX_RESTART_ATTEMPTS} after ${RESTART_DELAY}s..."
         isleep "$RESTART_DELAY"
-        start_gtacore
-        if [ -n "$GTACORE_PID" ] && kill -0 "$GTACORE_PID" 2>/dev/null; then
+        if start_gtacore; then
             echo "✅ gtacore restarted successfully (PID $GTACORE_PID)"
         else
             echo "❌ gtacore restart failed, will continue with backoff"
         fi
     fi
 
+    # 只有跨过稳定窗口才清零失败预算；避免“启动 3 秒后崩溃”永久停留在最短退避。
+    if [ "$GTACORE_RESTART_ATTEMPTS" -gt 0 ] \
+        && [ -n "$GTACORE_STARTED_AT" ] \
+        && [ -n "$GTACORE_PID" ] \
+        && kill -0 "$GTACORE_PID" 2>/dev/null; then
+        NOW=$(date +%s)
+        if [ $((NOW - GTACORE_STARTED_AT)) -ge "$GTACORE_STABLE_RESET_SECS" ]; then
+            echo "✅ gtacore remained stable for ${GTACORE_STABLE_RESET_SECS}s; resetting restart budget"
+            GTACORE_RESTART_ATTEMPTS=0
+        fi
+    fi
+
     # 检查 current generation 路径或证书 mtime 是否更新。reload 成功才推进状态（失败则下轮重试，
     # 用有界失败计数防止持续失败时每 10s 重载风暴）；任何失败都不强停健康进程。
     if [ "$NEEDS_CERT" = "true" ]; then
-        CANDIDATE_CERT=$(find_certificate)
-        CANDIDATE_KEY="${CANDIDATE_CERT%.crt}.key"
-        NEW_MTIME=""
-        if [ -n "$CANDIDATE_CERT" ] && [ -f "$CANDIDATE_CERT" ] && [ -f "$CANDIDATE_KEY" ]; then
-            NEW_MTIME=$(stat -c %Y "$CANDIDATE_CERT" 2>/dev/null || stat -f %m "$CANDIDATE_CERT" 2>/dev/null || echo "")
-        fi
-        CERT_CHANGED=false
-        if [ -n "$NEW_MTIME" ] && { [ "$CANDIDATE_CERT" != "$ACTUAL_CERT" ] || [ "$NEW_MTIME" != "$CERT_MTIME" ]; }; then
-            CERT_CHANGED=true
-        fi
-        if [ "$CANDIDATE_CERT" = "$REJECTED_CERT" ] && [ "$NEW_MTIME" = "$REJECTED_MTIME" ]; then
-            CERT_CHANGED=false
+        CANDIDATE_CERT_MAP=$(build_certificate_map 2>/dev/null) || CANDIDATE_CERT_MAP=""
+        NEW_CERT_STATE=""
+        if [ -n "$CANDIDATE_CERT_MAP" ]; then
+            NEW_CERT_STATE=$(certificate_map_state "$CANDIDATE_CERT_MAP") || NEW_CERT_STATE=""
         fi
 
-        if [ "$CERT_CHANGED" = "true" ]; then
-            PREVIOUS_CERT="$ACTUAL_CERT"
-            PREVIOUS_KEY="$ACTUAL_KEY"
-            ACTUAL_CERT="$CANDIDATE_CERT"
-            ACTUAL_KEY="$CANDIDATE_KEY"
+        if [ -n "$NEW_CERT_STATE" ] \
+            && [ "$NEW_CERT_STATE" != "$CERT_STATE" ] \
+            && [ "$NEW_CERT_STATE" != "$REJECTED_CERT_STATE" ]; then
+            PREVIOUS_CONFIG="/tmp/gtacore-config.previous.$$"
+            if ! cp "$GTACORE_RUNTIME_CONFIG" "$PREVIOUS_CONFIG"; then
+                echo "❌ Fatal: failed to snapshot gtacore config before certificate reload"
+                exit 1
+            fi
             echo "🔄 Certificate updated, reloading gtacore..."
-            if update_cert_paths && reload_gtacore; then
-                CERT_MTIME="$NEW_MTIME"
+            if update_cert_paths "$CANDIDATE_CERT_MAP" && reload_gtacore; then
+                CURRENT_CERT_MAP="$CANDIDATE_CERT_MAP"
+                CERT_STATE="$NEW_CERT_STATE"
                 CERT_RELOAD_FAILS=0
-                REJECTED_CERT=""
-                REJECTED_MTIME=""
+                REJECTED_CERT_STATE=""
+                rm -f "$PREVIOUS_CONFIG"
                 echo "✅ gtacore reloaded with new certificate"
             else
                 CERT_RELOAD_FAILS=$((CERT_RELOAD_FAILS + 1))
-                ACTUAL_CERT="$PREVIOUS_CERT"
-                ACTUAL_KEY="$PREVIOUS_KEY"
-                if [ -z "$ACTUAL_CERT" ] || [ ! -f "$ACTUAL_CERT" ] || [ ! -f "$ACTUAL_KEY" ]; then
-                    echo "❌ Fatal: certificate reload failed and no valid previous pair is available"
+                if ! mv "$PREVIOUS_CONFIG" "$GTACORE_RUNTIME_CONFIG"; then
+                    echo "❌ Fatal: failed to restore previous gtacore config"
                     exit 1
                 fi
-                if ! update_cert_paths; then
-                    echo "❌ Fatal: failed to restore previous certificate paths"
-                    exit 1
-                fi
+                chmod 0600 "$GTACORE_RUNTIME_CONFIG" 2>/dev/null || true
                 if [ -z "$GTACORE_PID" ] || ! kill -0 "$GTACORE_PID" 2>/dev/null; then
                     echo "🔄 Restoring gtacore with the previous certificate..."
-                    start_gtacore
-                    if [ -z "$GTACORE_PID" ] || ! kill -0 "$GTACORE_PID" 2>/dev/null; then
+                    if ! start_gtacore; then
                         echo "❌ Fatal: failed to restore gtacore after certificate reload failure"
                         exit 1
                     fi
                 fi
                 if [ "$CERT_RELOAD_FAILS" -ge "$CERT_RELOAD_MAX_FAILS" ]; then
-                    REJECTED_CERT="$CANDIDATE_CERT"
-                    REJECTED_MTIME="$NEW_MTIME"
+                    REJECTED_CERT_STATE="$NEW_CERT_STATE"
                     CERT_RELOAD_FAILS=0
-                    echo "⚠️  证书重载连续失败 ${CERT_RELOAD_MAX_FAILS} 次，隔离该 generation 至下一次证书变化；gtacore 已恢复旧证书"
+                    echo "⚠️  证书重载连续失败 ${CERT_RELOAD_MAX_FAILS} 次，隔离该证书集合至下一次变化；gtacore 已恢复旧配置"
                 else
-                    echo "⚠️  证书重载未成功 (${CERT_RELOAD_FAILS}/${CERT_RELOAD_MAX_FAILS})，已恢复旧证书，下一轮重试"
+                    echo "⚠️  证书重载未成功 (${CERT_RELOAD_FAILS}/${CERT_RELOAD_MAX_FAILS})，已恢复旧配置，下一轮重试"
                 fi
             fi
         fi
