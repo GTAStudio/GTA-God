@@ -1,0 +1,17 @@
+# 确保所有 shell 脚本使用 LF 行尾（Linux 格式）
+*.sh text eol=lf
+
+# Dockerfile 也使用 LF
+Dockerfile text eol=lf
+
+# 其他配置文件
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.rs text eol=lf
+*.toml text eol=lf
+Cargo.lock text eol=lf
+*.sha256 text eol=lf
+.gitattributes text eol=lf
+.gitignore text eol=lf
+.dockerignore text eol=lf

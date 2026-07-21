@@ -1,0 +1,50 @@
+# Git
+.git/
+.github/
+.gitignore
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+# OS
+.DS_Store
+Thumbs.db
+# Logs
+*.log
+# Deploy scripts (not needed in image)
+deploy.sh
+run*.sh
+setup-warp.sh
+build-and-push.sh
+# Config templates (deploy-only, not needed in image)
+*.example
+server-upload/
+# Exception: gtacore config templates baked in for run.sh server-side extract
+!gtacore-config.naive.example
+!gtacore-config.anytls-combo.example
+!gtacore-config.anyreality-combo.example
+!gtacore-config.l4.example
+!gtagod.conf.example
+# Docs
+README.md
+LICENSE
+# Tests are executed by CI before the release build. Only the immutable
+# in-container end-to-end probe is a runtime asset.
+tests/*
+!tests/container-data-path.sh
+# Temp files and backups
+*.tmp
+*.bak
+*.old
+*.backup.*
+*.rar
+*.zip
+*.tar.gz
+# Local config dirs
+caddy/
+singbox/
+certificates/
+# Env files
+*.env
+config.txt

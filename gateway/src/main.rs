@@ -1,0 +1,172 @@
+//! gtagate — GTA-God 的 L4 SNI 分流 + ACME(Cloudflare DNS-01) 网关。
+//!
+//! 纯 Rust 替代 Caddy 在本项目承担的两项职责：
+//!   1. 监听 443，按 TLS SNI 透传分流到 gtacore 的各 inbound 本地端口；
+//!   2. 通过 Cloudflare DNS-01 自动签发/续期泛域名证书并落盘。
+
+mod acme;
+mod config;
+mod dispatch;
+mod sni;
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use tokio_util::sync::CancellationToken;
+use tracing::{error, info, warn};
+use tracing_subscriber::EnvFilter;
+
+const DEFAULT_CONFIG_PATH: &str = "/etc/gtagate/config.json";
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .init();
+
+    // 安装默认 rustls 加密后端（供下游依赖使用）。
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    let arg = std::env::args().nth(1);
+    match arg.as_deref() {
+        Some("--version" | "-V") => {
+            println!("gtagate {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        Some("--help" | "-h") => {
+            println!("用法: gtagate [配置文件路径]  (默认 {DEFAULT_CONFIG_PATH})");
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    let config_path = arg
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH));
+
+    let cfg = Arc::new(config::Config::load(&config_path)?);
+    info!(config = %config_path.display(), "gtagate 启动");
+
+    // 优雅退出令牌：dispatcher 与 ACME 任务共用，收到信号时一并取消。
+    let cancel = CancellationToken::new();
+
+    // 后台启动 ACME 任务（不阻塞分流器；分流器为 TLS passthrough，无需等待证书）。
+    // 保留 JoinHandle，退出时给在途 DNS-01 清理一点时间，避免残留 _acme-challenge TXT。
+    let acme_task = cfg.acme.clone().map(|acme_cfg| {
+        let cancel = cancel.clone();
+        tokio::task::spawn_blocking(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    error!(%error, "创建独立 ACME runtime 失败");
+                    return;
+                }
+            };
+            runtime.block_on(acme::run(acme_cfg, cancel));
+        })
+    });
+    if acme_task.is_none() {
+        info!("未配置 ACME，仅运行 L4 分流");
+    }
+
+    let mut dispatcher = {
+        let cfg = Arc::clone(&cfg);
+        let cancel = cancel.clone();
+        tokio::spawn(async move { dispatch::run(cfg, cancel).await })
+    };
+
+    tokio::select! {
+        result = &mut dispatcher => {
+            let dispatcher_result = match result {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(e)) => {
+                    error!(error = %e, "分流器异常退出");
+                    Err(e)
+                }
+                Err(e) => {
+                    error!(error = %e, "分流器任务 panic");
+                    Err(anyhow::anyhow!("分流器任务失败: {e}"))
+                }
+            };
+            cancel.cancel();
+            if let Some(handle) = acme_task {
+                match tokio::time::timeout(std::time::Duration::from_secs(7), handle).await {
+                    Ok(Ok(())) => info!("ACME 任务已优雅退出"),
+                    Ok(Err(e)) => error!(error = %e, "ACME 任务 join 失败"),
+                    Err(_) => warn!("ACME 任务退出超过 7s 总预算，强制结束"),
+                }
+            }
+            dispatcher_result?;
+        }
+        _ = shutdown_signal() => {
+            info!("收到退出信号，gtagate 正在优雅关闭");
+            cancel.cancel();
+            // dispatcher drain 与 ACME TXT 清理并发执行，共享 7s 绝对预算：
+            // dispatcher 内部 5s 超时先触发，并为 entrypoint 8s 看门狗留出 1s 余量。
+            let shutdown_tasks = async {
+                let dispatcher_shutdown = async {
+                    match dispatcher.await {
+                        Ok(Ok(())) => info!("分流器已优雅退出"),
+                        Ok(Err(e)) => error!(error = %e, "分流器退出时报错"),
+                        Err(e) => error!(error = %e, "分流器任务 join 失败"),
+                    }
+                };
+                let acme_shutdown = async {
+                    if let Some(handle) = acme_task {
+                        match handle.await {
+                            Ok(()) => info!("ACME 任务已优雅退出"),
+                            Err(e) => error!(error = %e, "ACME 任务 join 失败"),
+                        }
+                    }
+                };
+                tokio::join!(dispatcher_shutdown, acme_shutdown);
+            };
+            if tokio::time::timeout(std::time::Duration::from_secs(7), shutdown_tasks)
+                .await
+                .is_err()
+            {
+                warn!("gtagate 优雅退出超过 7s 总预算，强制结束");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 等待 SIGTERM / SIGINT。
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::SignalKind;
+        // 任一信号注册失败时回退为永不完成的 future（见 wait_unix_signal），而非
+        // 让本函数立即返回——后者会被 main 的 select! 误判为"已收到退出信号"而
+        // 误触发优雅停机，叠加 --restart=always 可形成 crash-loop。
+        tokio::select! {
+            _ = wait_unix_signal(SignalKind::terminate(), "SIGTERM") => {}
+            _ = wait_unix_signal(SignalKind::interrupt(), "SIGINT") => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+/// 等待单个 Unix 信号；注册失败时记录错误并永久挂起，使该信号源在 `select!` 中
+/// 不可达，但不影响其它信号源，也绝不被误判为"收到信号"。
+#[cfg(unix)]
+async fn wait_unix_signal(kind: tokio::signal::unix::SignalKind, name: &str) {
+    match tokio::signal::unix::signal(kind) {
+        Ok(mut s) => {
+            s.recv().await;
+        }
+        Err(e) => {
+            error!(error = %e, signal = name, "注册退出信号失败，该信号将不可用");
+            std::future::pending::<()>().await;
+        }
+    }
+}
