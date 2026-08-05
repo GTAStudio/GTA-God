@@ -22,30 +22,29 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
-      - name: Prepare workspace
-        env:
-          ACCESS_TOKEN: ${{ secrets.BUILD_TOKEN }}
-          SOURCE_REPOSITORY: ${{ secrets.BUILD_SOURCE_REPOSITORY }}
-          COMPONENT_REPOSITORY: ${{ secrets.BUILD_COMPONENT_REPOSITORY }}
-        run: |
-          set +x
-          source_dir="$RUNNER_TEMP/source"
-          component_dir="$RUNNER_TEMP/component"
-          auth_header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$ACCESS_TOKEN" | base64 -w0)"
-          git -c http.extraHeader="$auth_header" clone --quiet --depth 1 \
-            "https://github.com/${SOURCE_REPOSITORY}.git" "$source_dir" \
-            >"$RUNNER_TEMP/source-checkout.log" 2>&1
-          git -c http.extraHeader="$auth_header" clone --quiet --depth 1 \
-            "https://github.com/${COMPONENT_REPOSITORY}.git" "$component_dir" \
-            >"$RUNNER_TEMP/component-checkout.log" 2>&1
-          echo "SOURCE_DIR=$source_dir" >> "$GITHUB_ENV"
-          echo "COMPONENT_DIR=$component_dir" >> "$GITHUB_ENV"
+      - name: Prepare source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ secrets.BUILD_SOURCE_REPOSITORY }}
+          token: ${{ secrets.BUILD_TOKEN }}
+          path: workspace/source
+          persist-credentials: false
+
+      - name: Prepare component
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ secrets.BUILD_COMPONENT_REPOSITORY }}
+          token: ${{ secrets.BUILD_TOKEN }}
+          path: workspace/component
+          persist-credentials: false
 
       - name: Prepare builder
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Build, validate and publish
         env:
+          SOURCE_DIR: ${{ github.workspace }}/workspace/source
+          COMPONENT_SOURCE_DIR: ${{ github.workspace }}/workspace/component
           REGISTRY_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           REGISTRY_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
           IMAGE_REPOSITORY: ${{ secrets.DOCKERHUB_USERNAME }}/gtagod
@@ -53,5 +52,4 @@ jobs:
           RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set +x
-          export COMPONENT_SOURCE_DIR="$COMPONENT_DIR"
           sh "$SOURCE_DIR/scripts/publish-image.sh"
