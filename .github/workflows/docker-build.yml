@@ -1,4 +1,4 @@
-# Minimal image assembly and publication pipeline.
+# Image assembly and publication pipeline.
 name: Build and Publish Image
 
 on:
