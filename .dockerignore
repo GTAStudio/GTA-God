@@ -1,5 +1,0 @@
-*
-!Dockerfile
-!payload/
-!payload/runtime.tar.gz
-!payload/runtime.tar.gz.sha256
