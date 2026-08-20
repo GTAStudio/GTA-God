@@ -1,0 +1,58 @@
+# Public orchestration only.
+name: Build and Publish Rust Image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/docker-build-rust.yml
+  workflow_dispatch:
+
+concurrency:
+  group: rust-image-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  DOCKER_BUILD_RECORD_UPLOAD: "false"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Prepare source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ secrets.BUILD_SOURCE_REPOSITORY }}
+          ref: main
+          token: ${{ secrets.BUILD_TOKEN }}
+          path: workspace/source
+          persist-credentials: false
+
+      - name: Prepare GTACore-Rust
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: GTAStudio/GTACore
+          ref: gtacore-rust-main
+          token: ${{ secrets.BUILD_TOKEN }}
+          path: workspace/component
+          persist-credentials: false
+
+      - name: Prepare builder
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Build, validate and publish Rust image
+        env:
+          SOURCE_DIR: ${{ github.workspace }}/workspace/source
+          COMPONENT_SOURCE_DIR: ${{ github.workspace }}/workspace/component
+          REGISTRY_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          REGISTRY_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          IMAGE_REPOSITORY: ${{ secrets.DOCKERHUB_USERNAME }}/gtagod
+          RELEASE_ID: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set +x
+          sh "$SOURCE_DIR/scripts/publish-rust-image.sh"
