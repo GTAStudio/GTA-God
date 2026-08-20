@@ -1,4 +1,4 @@
-# Public orchestration only.
+# Public orchestration only. Build credentials remain repository secrets.
 name: Build and Publish Rust Image
 
 on:
