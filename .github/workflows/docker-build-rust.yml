@@ -1,5 +1,5 @@
 # Public orchestration only. Build credentials remain repository secrets.
-# Release source: GTA-God-Dev 2ad4bda2ffe4438d4364f62e82ca1676d0b863f3
+# Release source: GTA-God-Dev 0bf3475c8ea3900cb3aa09d4182d2f38e1500407
 # GTACore-Rust: acc46576563b02c6312255eaee0d0112292f2ec7
 name: Build and Publish Rust Image
 
@@ -29,7 +29,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ secrets.BUILD_SOURCE_REPOSITORY }}
-          ref: main
+          ref: 0bf3475c8ea3900cb3aa09d4182d2f38e1500407
           token: ${{ secrets.BUILD_TOKEN }}
           path: workspace/source
           persist-credentials: false
@@ -38,7 +38,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: GTAStudio/GTACore
-          ref: gtacore-rust-main
+          ref: acc46576563b02c6312255eaee0d0112292f2ec7
           token: ${{ secrets.BUILD_TOKEN }}
           path: workspace/component
           persist-credentials: false
