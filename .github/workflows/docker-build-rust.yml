@@ -1,4 +1,6 @@
 # Public orchestration only. Build credentials remain repository secrets.
+# Release source: GTA-God-Dev 2ad4bda2ffe4438d4364f62e82ca1676d0b863f3
+# GTACore-Rust: acc46576563b02c6312255eaee0d0112292f2ec7
 name: Build and Publish Rust Image
 
 on:
