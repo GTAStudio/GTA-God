@@ -43,16 +43,20 @@ jobs:
           gh release download "$ARTIFACT_RELEASE" \
             --repo GTAStudio/GTA-God-Dev \
             --dir artifact
+          test "$(find artifact -maxdepth 1 -type f | wc -l)" -eq 6
           cat <<'CHECKSUMS' | sha256sum --check --strict -
-          1af3c186bee8f1a5a021dcc1ac2325dc8eec70e74a6d5b17e4c9c64620b812a0  artifact/Dockerfile
-          f5d1a50722886347782c52f272199c0ad31bf3f08b935ab3e28affba45197e83  artifact/artifact.json
-          92fb2f417cc6c340d1416cbf7ad0de7484e4087ba19aa7fd558421feaf7dc50a  artifact/docker-entrypoint-artifact.sh
+          44116241cadd340874fc3d1a008780e101dff28016d1f15059f998baad2fa670  artifact/Dockerfile
+          7ecd092665d61a26658fcd9ba65dc0fd7c48c0901f7d0186b8400668da38bbff  artifact/artifact.json
+          d00fe6e09fbff01ffccfb8b541c3651c5a686d709e58ded2e11be6dce69cc0f0  artifact/docker-entrypoint-current.sh
           669fac3e4ec3fe5cd13b6956055b0452f7abbc8f8b74636b4399657c3eac2ccb  artifact/gtacore
-          03c88ce0090301e98ff1782c768fa4cbf00ec4bcb374e2b3b05641914661d7e3  artifact/ten-axis-smoke.sh
+          56650983459ae938d6f3bad45e256afe506c9ea7ad25d2d76a6b63aebcdcd9c3  artifact/healthcheck-current.sh
+          b7b54e0ed602d7cbc63e9c4c0fbbb35ecf21cf959107ca01f9cdf6f1a0c2435c  artifact/ten-axis-smoke.sh
           CHECKSUMS
           test "$(jq -r .sha256 artifact/artifact.json)" = "$ARTIFACT_SHA256"
           test "$(jq -r .build artifact/artifact.json)" = "63bd244cca8f-$ARTIFACT_BUILD"
-          chmod 0755 artifact/gtacore artifact/docker-entrypoint-artifact.sh artifact/ten-axis-smoke.sh
+          test "$(jq -r .gateway_source artifact/artifact.json)" = "aizhihuxiao/gtagod:gtacore-63bd244@sha256:d72151e65813a9c3f4b2708d18b08936cb5be8deaf41e496a0bd80d3ec32e3c6"
+          chmod 0755 artifact/gtacore artifact/docker-entrypoint-current.sh \
+            artifact/healthcheck-current.sh artifact/ten-axis-smoke.sh
           artifact/gtacore --version | grep -F "$ARTIFACT_BUILD"
 
       - name: Build exact artifact candidate
@@ -70,6 +74,7 @@ jobs:
           set -euo pipefail
           test "$(docker run --rm --entrypoint sha256sum local/gtagod:gtacore-669fac3 /usr/bin/gtacore | awk '{print $1}')" = "$ARTIFACT_SHA256"
           docker run --rm --entrypoint /usr/bin/gtacore local/gtagod:gtacore-669fac3 --version | grep -F "$ARTIFACT_BUILD"
+          docker run --rm --entrypoint /usr/bin/gtagate local/gtagod:gtacore-669fac3 --version | grep -F 'gtagate 0.0.1'
           REPO="$GITHUB_WORKSPACE/source" IMAGE=local/gtagod:gtacore-669fac3 \
             sh artifact/ten-axis-smoke.sh
 
