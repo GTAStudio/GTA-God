@@ -13,9 +13,11 @@ permissions:
 
 env:
   DOCKER_BUILD_RECORD_UPLOAD: "false"
-  ARTIFACT_RELEASE: docker-input-gtacore-7539138
-  ARTIFACT_SHA256: 7539138ba920bc634baabf2a35a65c47f5f2c7eac0c4c173068a69d94251cbcd
-  ARTIFACT_BUILD: 26e209d8d5af
+  ARTIFACT_RELEASE: docker-input-gtacore-d9465be
+  ARTIFACT_SHA256: d9465bea02aeaa1b91a9865f7388107312c8af48829cdb8f799e3bd6cfeedbde
+  ARTIFACT_BUILD: 9359fdde6f8e-dirty
+  ARTIFACT_VERSION: 0.0.2
+  GATEWAY_SOURCE: aizhihuxiao/gtagod:gtacore-53075bb@sha256:394adbac4142e70d9128b7722c78e3160062eb322f0f05cbe405b3a230eb324e
 
 jobs:
   build:
@@ -26,7 +28,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ secrets.BUILD_SOURCE_REPOSITORY }}
-          ref: 9de3057ea2b90282abaf0a5181b73af95d050764
+          ref: dae9026fa8bfd0fdd12caffd30af350a2191e0f2
           token: ${{ secrets.BUILD_TOKEN }}
           path: source
           persist-credentials: false
@@ -45,18 +47,20 @@ jobs:
             --dir artifact
           test "$(find artifact -maxdepth 1 -type f | wc -l)" -eq 6
           cat <<'CHECKSUMS' | sha256sum --check --strict -
-          44116241cadd340874fc3d1a008780e101dff28016d1f15059f998baad2fa670  artifact/Dockerfile
-          b61c2512631a9f7f98fa14cdd06c8cb7323d3eb30bd79dee97dd91c66afccdc0  artifact/artifact.json
+          6b31204894b6e496c92d0e5254f3ab888e66782f6cff7e3a4af63fd39c426423  artifact/Dockerfile
+          6d159b2df58d448533e4a2377038243b13d3450ee9850f41326b7c9a262bdc88  artifact/artifact.json
           d00fe6e09fbff01ffccfb8b541c3651c5a686d709e58ded2e11be6dce69cc0f0  artifact/docker-entrypoint-current.sh
-          7539138ba920bc634baabf2a35a65c47f5f2c7eac0c4c173068a69d94251cbcd  artifact/gtacore
+          d9465bea02aeaa1b91a9865f7388107312c8af48829cdb8f799e3bd6cfeedbde  artifact/gtacore
           56650983459ae938d6f3bad45e256afe506c9ea7ad25d2d76a6b63aebcdcd9c3  artifact/healthcheck-current.sh
-          40eaacf006ded838ae70710b2d585f99c43abb88c4dfc6ab6a19a17c955e4884  artifact/ten-axis-smoke.sh
+          0b2377194fc245f08e8351c559ee96310433393e6c71257e2d996df15440b8a4  artifact/ten-axis-smoke.sh
           CHECKSUMS
           test "$(jq -r .sha256 artifact/artifact.json)" = "$ARTIFACT_SHA256"
           test "$(jq -r .build artifact/artifact.json)" = "$ARTIFACT_BUILD"
-          test "$(jq -r .gateway_source artifact/artifact.json)" = "aizhihuxiao/gtagod:gtacore-63bd244@sha256:d72151e65813a9c3f4b2708d18b08936cb5be8deaf41e496a0bd80d3ec32e3c6"
+          test "$(jq -r .version artifact/artifact.json)" = "$ARTIFACT_VERSION"
+          test "$(jq -r .gateway_source artifact/artifact.json)" = "$GATEWAY_SOURCE"
           chmod 0755 artifact/gtacore artifact/docker-entrypoint-current.sh \
             artifact/healthcheck-current.sh artifact/ten-axis-smoke.sh
+          artifact/gtacore --version | grep -F "GTACore $ARTIFACT_VERSION"
           artifact/gtacore --version | grep -F "$ARTIFACT_BUILD"
 
       - name: Build exact artifact candidate
@@ -64,18 +68,26 @@ jobs:
           set -euo pipefail
           docker buildx build --load --platform linux/amd64 \
             --file artifact/Dockerfile \
-            --tag local/gtagod:gtacore-7539138 \
+            --tag local/gtagod:gtacore-d9465be \
             --build-arg "GTACORE_ARTIFACT_SHA256=$ARTIFACT_SHA256" \
             --build-arg "GTACORE_ARTIFACT_BUILD=$ARTIFACT_BUILD" \
+            --build-arg "GTAGOD_VERSION=$ARTIFACT_VERSION" \
             artifact
 
       - name: Validate identity and ten-axis runtime
         run: |
           set -euo pipefail
-          test "$(docker run --rm --entrypoint sha256sum local/gtagod:gtacore-7539138 /usr/bin/gtacore | awk '{print $1}')" = "$ARTIFACT_SHA256"
-          docker run --rm --entrypoint /usr/bin/gtacore local/gtagod:gtacore-7539138 --version | grep -F "$ARTIFACT_BUILD"
-          docker run --rm --entrypoint /usr/bin/gtagate local/gtagod:gtacore-7539138 --version | grep -F 'gtagate 0.0.1'
-          REPO="$GITHUB_WORKSPACE/source" IMAGE=local/gtagod:gtacore-7539138 \
+          image=local/gtagod:gtacore-d9465be
+          test "$(docker run --rm --entrypoint sha256sum "$image" /usr/bin/gtacore | awk '{print $1}')" = "$ARTIFACT_SHA256"
+          docker run --rm --entrypoint /usr/bin/gtacore "$image" --version | grep -F "GTACore $ARTIFACT_VERSION"
+          docker run --rm --entrypoint /usr/bin/gtacore "$image" --version | grep -F "$ARTIFACT_BUILD"
+          test "$(docker run --rm --entrypoint /usr/bin/gtagate "$image" --version)" = "gtagate $ARTIFACT_VERSION"
+          test "$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$image")" = "$ARTIFACT_VERSION"
+          test "$(docker inspect --format '{{ index .Config.Labels "io.gtagod.gtacore.version" }}' "$image")" = "$ARTIFACT_VERSION"
+          test "$(docker inspect --format '{{ index .Config.Labels "io.gtagod.gateway.version" }}' "$image")" = "$ARTIFACT_VERSION"
+          docker run --rm --entrypoint /usr/bin/env "$image" | grep -Fx "GTAGOD_VERSION=$ARTIFACT_VERSION"
+          docker run --rm --entrypoint /usr/bin/env "$image" | grep -Fx "GTACORE_RUST_VERSION=$ARTIFACT_VERSION"
+          REPO="$GITHUB_WORKSPACE/source" IMAGE="$image" \
             sh artifact/ten-axis-smoke.sh
 
       - name: Publish verified image
@@ -87,19 +99,20 @@ jobs:
           printf '%s' "$REGISTRY_TOKEN" | docker login \
             --username "$REGISTRY_USERNAME" --password-stdin
           repository="$REGISTRY_USERNAME/gtagod"
-          artifact_tag="$repository:artifact-7539138"
-          build_tag="$repository:gtacore-26e209d8d5af"
-          version_tag="$repository:v0.0.1-26e209d8d5af"
+          artifact_tag="$repository:artifact-d9465be"
+          build_tag="$repository:gtacore-$ARTIFACT_BUILD"
+          version_build_tag="$repository:v$ARTIFACT_VERSION-$ARTIFACT_BUILD"
+          version_tag="$repository:v$ARTIFACT_VERSION"
           latest_tag="$repository:latest"
-          for tag in "$artifact_tag" "$build_tag" "$version_tag" "$latest_tag"; do
-            docker tag local/gtagod:gtacore-7539138 "$tag"
+          for tag in "$artifact_tag" "$build_tag" "$version_build_tag" "$version_tag" "$latest_tag"; do
+            docker tag local/gtagod:gtacore-d9465be "$tag"
           done
-          for tag in "$artifact_tag" "$build_tag" "$version_tag"; do
+          for tag in "$artifact_tag" "$build_tag" "$version_build_tag" "$version_tag"; do
             docker push --quiet "$tag"
           done
           docker push --quiet "$latest_tag"
           expected=""
-          for tag in "$artifact_tag" "$build_tag" "$version_tag" "$latest_tag"; do
+          for tag in "$artifact_tag" "$build_tag" "$version_build_tag" "$version_tag" "$latest_tag"; do
             digest=$(docker buildx imagetools inspect "$tag" | awk '$1 == "Digest:" { print $2; exit }')
             test -n "$digest"
             if [ -z "$expected" ]; then
