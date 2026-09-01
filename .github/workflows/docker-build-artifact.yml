@@ -1,0 +1,98 @@
+# Validation-only orchestration for the exact GTACore daemon tracked by the
+# locked wrapper commit. This lane cannot publish or promote image aliases.
+# Release source: GTA-God-Dev 14ce3edc50f4fc2444aa4d9750d56804e6a1cd14
+# GTACore wrapper: eb3b9cb09fd59770c55b38d6885ae478a3199f83
+# GTACore source: 9d35129fba8826e37ed8e513d96f9617a10070fd
+name: Validate Supplied GTACore Image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/docker-build-artifact.yml
+  workflow_dispatch:
+
+concurrency:
+  group: supplied-gtacore-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  DOCKER_BUILD_RECORD_UPLOAD: "false"
+  ARTIFACT_IMAGE: local/gtagod-artifact:7c8abe0
+  ARTIFACT_SHA256: 7c8abe0d3c415883d63bb6278f496fdb56c6572502efcd402d55052a8e70e187
+  ARTIFACT_BUILD: 9d35129fba88
+  ARTIFACT_VERSION: 0.0.2
+  GTACORE_WRAPPER_REVISION: eb3b9cb09fd59770c55b38d6885ae478a3199f83
+  GTACORE_SOURCE_REVISION: 9d35129fba8826e37ed8e513d96f9617a10070fd
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - name: Prepare private release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ secrets.BUILD_SOURCE_REPOSITORY }}
+          ref: 14ce3edc50f4fc2444aa4d9750d56804e6a1cd14
+          token: ${{ secrets.BUILD_TOKEN }}
+          path: workspace/source
+          persist-credentials: false
+
+      - name: Prepare locked GTACore artifact and source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: GTAStudio/GTACore
+          ref: eb3b9cb09fd59770c55b38d6885ae478a3199f83
+          fetch-depth: 2
+          token: ${{ secrets.BUILD_TOKEN }}
+          path: workspace/component
+          persist-credentials: false
+
+      - name: Prepare builder
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Verify identity and package exact artifact
+        env:
+          SOURCE_DIR: ${{ github.workspace }}/workspace/source
+          COMPONENT_DIR: ${{ github.workspace }}/workspace/component
+          PACKAGE_DIR: ${{ github.workspace }}/workspace/package
+        run: |
+          set -euo pipefail
+          python3 "$SOURCE_DIR/scripts/check-component-lock.py" \
+            --lock "$SOURCE_DIR/components.lock.json" \
+            --gtagod-dir "$SOURCE_DIR" \
+            --gtacore-dir "$COMPONENT_DIR" \
+            --gtacore-artifact "$COMPONENT_DIR/deployment/linux/gtacore"
+          test "$(git -C "$COMPONENT_DIR" rev-parse HEAD)" = "$GTACORE_WRAPPER_REVISION"
+          test "$(git -C "$COMPONENT_DIR" rev-parse HEAD^)" = "$GTACORE_SOURCE_REVISION"
+          test "$(sha256sum "$COMPONENT_DIR/deployment/linux/gtacore" | awk '{print $1}')" = "$ARTIFACT_SHA256"
+          python3 "$SOURCE_DIR/scripts/package-gtacore-artifact.py" \
+            --lock "$SOURCE_DIR/components.lock.json" \
+            --binary "$COMPONENT_DIR/deployment/linux/gtacore" \
+            --template-dir "$SOURCE_DIR/artifact/gtacore-daemon" \
+            --output "$PACKAGE_DIR"
+          test "$(jq -r .artifact.build "$PACKAGE_DIR/artifact.json")" = "$ARTIFACT_BUILD"
+          test "$(jq -r .artifact.version "$PACKAGE_DIR/artifact.json")" = "$ARTIFACT_VERSION"
+
+      - name: Build exact external-daemon image
+        env:
+          GTACORE_SOURCE_DIR: ${{ github.workspace }}/workspace/component
+          ARTIFACT_PACKAGE_DIR: ${{ github.workspace }}/workspace/package
+          IMAGE: ${{ env.ARTIFACT_IMAGE }}
+        working-directory: workspace/source
+        run: sh scripts/build-local-artifact-image.sh
+
+      - name: Run identity, listener, data-path, and fail-closed smoke
+        env:
+          REPO_ROOT: ${{ github.workspace }}/workspace/source
+          IMAGE: ${{ env.ARTIFACT_IMAGE }}
+          EXPECTED_SHA256: ${{ env.ARTIFACT_SHA256 }}
+          EXPECTED_BUILD: ${{ env.ARTIFACT_BUILD }}
+          EXPECTED_WRAPPER_REVISION: ${{ env.GTACORE_WRAPPER_REVISION }}
+          EXPECTED_SOURCE_REVISION: ${{ env.GTACORE_SOURCE_REVISION }}
+          EXPECTED_VERSION: ${{ env.ARTIFACT_VERSION }}
+        run: sh "$REPO_ROOT/tests/artifact-container-runtime-smoke.sh"

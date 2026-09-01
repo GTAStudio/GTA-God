@@ -26,4 +26,6 @@ Publication additionally requires `GTAGOD_COSIGN_PRIVATE_KEY` and, when applicab
 
 ## Supplied binary policy
 
-The former supplied-GTACore artifact workflow has been removed. The currently known supplied binary is an unattested dirty build whose observed wrapper lock contains a yanked dependency. The private source repository labels that lane `blocked-yanked-dependency`; it is local-validation-only and must not be published or promoted to `latest`.
+The supplied-GTACore workflow is validation-only. It checks out the exact private GTAGod revision and the exact GTACore wrapper revision, verifies that the wrapper's sole parent matches the clean source revision reported by the binary, packages the tracked binary deterministically, builds the external-daemon image, and runs the complete artifact runtime smoke test.
+
+The currently locked binary still contains yanked `chacha20 0.10.1` and has no signed attestation binding its dependency and sidecar inputs. The image therefore remains labeled `blocked-yanked-dependency`. The workflow has no registry login or publication step and must never publish or promote this candidate to `latest`.
