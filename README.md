@@ -23,6 +23,7 @@ The Rust lane is the default production architecture. The SB lane is an explicit
 9. Production deployment must verify and use the immutable digest, never a mutable alias.
 
 Publication additionally requires `GTAGOD_COSIGN_PRIVATE_KEY` and, when applicable, `GTAGOD_COSIGN_PASSWORD`. Source checkout, component checkout, registry, and signing credentials remain encrypted repository secrets and must never be printed.
+The corresponding public verification key is tracked as [`cosign.pub`](cosign.pub).
 
 ## Supplied binary policy
 
