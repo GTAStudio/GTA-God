@@ -1,5 +1,5 @@
 # Public orchestration only. Product source and build credentials remain private.
-# Release source: GTA-God-Dev bf06a417c904d511607557ebf7d6e3b2b390f01f
+# Release source: GTA-God-Dev 805fa6a0e608a3a488e98527478d00403edf0931
 # GTACore-Rust: 4d23b75f79c671b31dec4ba4f8e592f05c722298
 name: Validate or Publish Rust Image
 
@@ -36,7 +36,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ secrets.BUILD_SOURCE_REPOSITORY }}
-          ref: bf06a417c904d511607557ebf7d6e3b2b390f01f
+          ref: 805fa6a0e608a3a488e98527478d00403edf0931
           token: ${{ secrets.BUILD_TOKEN }}
           path: workspace/source
           persist-credentials: false
