@@ -8,7 +8,7 @@ This public repository contains release orchestration only. It does not contain 
 - `GTAStudio/GTA-God` is this public orchestration repository. It owns only workflows and repository secrets used to fetch exact private inputs and run the private release scripts.
 - `GTAStudio/GTACore` and `GTAStudio/GTAcore-SB` are independent component repositories. Every release workflow pins their full commit IDs.
 
-The Rust lane is the default production architecture. The SB lane is an explicit rollback architecture and uses separate `sb-*` image aliases. The two lanes must never overwrite each other's mutable tags.
+GTACore is the only production data plane. Rollback may use only a previously signed, verified GTACore image pinned by immutable digest. SB workflows, source references, and `sb-*` image assets are historical comparison fixtures, not production or rollback candidates.
 
 ## Safe update sequence
 
@@ -27,6 +27,6 @@ The corresponding public verification key is tracked as [`cosign.pub`](cosign.pu
 
 ## Supplied binary policy
 
-The supplied-GTACore workflow is validation-only. It checks out the exact private GTAGod revision and the exact GTACore wrapper revision, verifies that the wrapper's sole parent matches the clean source revision reported by the binary, packages the tracked binary deterministically, builds the external-daemon image, and runs the complete artifact runtime smoke test.
+The supplied-GTACore workflow is validation-only. It checks out the exact private GTAGod and GTACore revisions, verifies the supplied binary against the private component lock, packages it deterministically, builds the external-daemon image, and runs the artifact runtime smoke tests.
 
-The currently locked binary still contains yanked `chacha20 0.10.1` and has no signed attestation binding its dependency and sidecar inputs. The image therefore remains labeled `blocked-yanked-dependency`. The workflow has no registry login or publication step and must never publish or promote this candidate to `latest`.
+The locked supplied binary is a historical validation input, not the current source-built release. It has no signed build attestation binding its dependency and sidecar inputs; a clean source lock alone does not prove those binary inputs. The image remains labeled `blocked-unattested-artifact`. The workflow has no registry login or publication step and must never publish or promote this candidate to `latest`.
