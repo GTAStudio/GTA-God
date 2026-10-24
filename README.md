@@ -25,6 +25,21 @@ GTACore is the only production data plane. Rollback may use only a previously si
 Publication additionally requires `GTAGOD_COSIGN_PRIVATE_KEY` and, when applicable, `GTAGOD_COSIGN_PASSWORD`. Source checkout, component checkout, registry, and signing credentials remain encrypted repository secrets and must never be printed.
 The corresponding public verification key is tracked as [`cosign.pub`](cosign.pub).
 
+## Orchestration dependency baseline
+
+The 2026-10-23 refresh uses the available Ubuntu 26.04 hosted image, Buildx
+action v4.4.1, Cosign v3.1.4, SBOM action v0.24.3 and Syft v1.55.0.
+Checkout v7.0.1, Cosign installer v4.1.2 and cargo-deny 0.20.2 were already
+the latest stable releases at that check. Actions remain pinned to their full
+commit IDs, not moving version aliases.
+
+Rust-based host tooling is explicitly built with Rust 1.99.1, and the workflow
+verifies the selected compiler instead of inheriting the runner's default.
+
+These tooling updates alone do not advance the private source or component pins,
+prove private CI acceptance, publish an image, or authorize deployment.
+Dependency updates in private source still follow the sequence above.
+
 ## Supplied binary policy
 
 The supplied-GTACore workflow is validation-only. It checks out the exact private GTAGod and GTACore revisions, verifies the supplied binary against the private component lock, packages it deterministically, builds the external-daemon image, and runs the artifact runtime smoke tests.
