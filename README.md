@@ -27,6 +27,21 @@ GTACore is the only production data plane. Rollback may use only a previously si
 Publication additionally requires `GTAGOD_COSIGN_PRIVATE_KEY` and, when applicable, `GTAGOD_COSIGN_PASSWORD`. Source checkout, component checkout, registry, and signing credentials remain encrypted repository secrets and must never be printed.
 The corresponding public verification key is tracked as [`cosign.pub`](cosign.pub).
 
+## Latest verified image
+
+Version **0.0.13** was built from the pinned source by the official workflow and
+published in [run 41568857703, attempt 1](https://github.com/GTAStudio/GTA-God/actions/runs/41568857703).
+The registry digest, signature, SPDX, exact SLSA v1 identities/materials and all
+three aliases were independently verified with the trusted public key.
+
+```text
+docker.io/aizhihuxiao/gtagod@sha256:37242e835f2300c108f0e779ce2fb549a1a628473641058a3aaeb0e966a5eb5a
+```
+
+`v0.0.13`, `gtacore-7034f53` and `latest` resolve to that digest.
+`DOCKER_PUBLISH_ENABLED` was restored and read back as `false`.
+This is publication evidence, not a claim that any server was deployed.
+
 ## Active orchestration dependency baseline
 
 The active Rust workflow uses the available Ubuntu 26.04 hosted image, Buildx
