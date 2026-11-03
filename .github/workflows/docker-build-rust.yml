@@ -1,6 +1,6 @@
 # Public orchestration only. Product source and build credentials remain private.
-# Release source: GTA-God-Dev 22abbe15c9d9dabdc59cf8a17618dd4d2f072529
-# GTACore-Rust: fe2e9d5c0b025d67235281261e953b9b1fd35b18 (0.0.12)
+# Release source: GTA-God-Dev bd974844dba3b339a09566063c9084c63622bbdf
+# GTACore-Rust: 7034f53d6a5324bf2d882a3e00a17abf34eca9fa (0.0.13)
 name: Validate or Publish Rust Image
 
 on:
@@ -17,7 +17,7 @@ on:
         type: boolean
 
 concurrency:
-  group: rust-image-${{ github.ref }}
+  group: rust-image-publication
   # Never cancel a publication between immutable push and alias promotion.
   cancel-in-progress: false
 
@@ -27,17 +27,26 @@ permissions:
 env:
   DOCKER_BUILD_RECORD_UPLOAD: "false"
   RUSTUP_TOOLCHAIN: "1.99.1"
+  PRODUCT_REVISION: bd974844dba3b339a09566063c9084c63622bbdf
+  CORE_REVISION: 7034f53d6a5324bf2d882a3e00a17abf34eca9fa
 
 jobs:
   build:
     runs-on: ubuntu-26.04
     timeout-minutes: 75
     steps:
+      - name: Prepare trusted public orchestration and verification key
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: workspace/orchestration
+          persist-credentials: false
+
       - name: Prepare source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ secrets.BUILD_SOURCE_REPOSITORY }}
-          ref: 22abbe15c9d9dabdc59cf8a17618dd4d2f072529
+          ref: ${{ env.PRODUCT_REVISION }}
           token: ${{ secrets.BUILD_TOKEN }}
           path: workspace/source
           persist-credentials: false
@@ -46,7 +55,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: GTAStudio/GTACore
-          ref: fe2e9d5c0b025d67235281261e953b9b1fd35b18
+          ref: ${{ env.CORE_REVISION }}
           fetch-depth: 0
           token: ${{ secrets.BUILD_TOKEN }}
           path: workspace/component
@@ -60,25 +69,39 @@ jobs:
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
           rustc --version | grep -F "rustc ${RUSTUP_TOOLCHAIN} "
 
-      - name: Install pinned cargo-deny
-        run: cargo install cargo-deny --version 0.20.2 --locked
+      - name: Require accepted credential-free publisher contract
+        env:
+          SOURCE_DIR: ${{ github.workspace }}/workspace/source
+          COMPONENT_SOURCE_DIR: ${{ github.workspace }}/workspace/component
+          RELEASE_ID: ${{ github.sha }}
+          PUBLISH_IMAGE: "false"
+        run: |
+          set -euo pipefail
+          test "$(sh "$SOURCE_DIR/scripts/publish-rust-image.sh" --contract-version)" = 2 || {
+            echo "::error::Publisher v2 must pass private CI before its exact source pin is advanced."
+            exit 1
+          }
+
+      - name: Install checksum-pinned dependency and image scanners
+        env:
+          SOURCE_DIR: ${{ github.workspace }}/workspace/source
+        run: sh "$SOURCE_DIR/scripts/install-release-tools.sh" cargo-deny cargo-audit trivy
 
       - name: Resolve fail-closed publication policy
         id: policy
         env:
           REQUESTED: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
           ENABLED: ${{ vars.DOCKER_PUBLISH_ENABLED }}
-          SIGNING_KEY: ${{ secrets.GTAGOD_COSIGN_PRIVATE_KEY }}
         run: |
           set -euo pipefail
           publish=false
           if [ "$REQUESTED" = true ]; then
-            [ "$ENABLED" = true ] || {
-              echo "publication is disabled by DOCKER_PUBLISH_ENABLED" >&2
+            [ "$GITHUB_REF" = refs/heads/main ] || {
+              echo "publication is allowed only from main" >&2
               exit 1
             }
-            [ -n "$SIGNING_KEY" ] || {
-              echo "GTAGOD_COSIGN_PRIVATE_KEY is not configured" >&2
+            [ "$ENABLED" = true ] || {
+              echo "publication is disabled by DOCKER_PUBLISH_ENABLED" >&2
               exit 1
             }
             publish=true
@@ -92,23 +115,42 @@ jobs:
           cosign-release: v3.1.4
 
       - name: Install pinned Syft
-        if: steps.policy.outputs.publish == 'true'
         uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           syft-version: v1.55.0
 
-      - name: Build and validate Rust image
+      - name: Build and validate without registry or signing authority
         env:
           SOURCE_DIR: ${{ github.workspace }}/workspace/source
           COMPONENT_SOURCE_DIR: ${{ github.workspace }}/workspace/component
+          RELEASE_ID: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+          PUBLISH_IMAGE: "false"
+          PUBLISH_PHASE: validate
+          RELEASE_POLICY: ${{ steps.policy.outputs.publish == 'true' && 'production' || 'validation-only' }}
+          CANDIDATE_DIR: ${{ runner.temp }}/gtagod-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set +x
+          sh "$SOURCE_DIR/scripts/publish-rust-image.sh"
+
+      - name: Authenticate immutable evidence and promote aliases
+        if: steps.policy.outputs.publish == 'true'
+        env:
+          SOURCE_DIR: ${{ github.workspace }}/workspace/source
+          COMPONENT_SOURCE_DIR: ${{ github.workspace }}/workspace/component
+          EXPECTED_SOURCE_REVISION: ${{ env.PRODUCT_REVISION }}
+          EXPECTED_CORE_REVISION: ${{ env.CORE_REVISION }}
           REGISTRY_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           REGISTRY_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
           IMAGE_REPOSITORY: ${{ secrets.DOCKERHUB_USERNAME }}/gtagod
           RELEASE_ID: ${{ github.sha }}
           RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
-          PUBLISH_IMAGE: ${{ steps.policy.outputs.publish }}
+          PUBLISH_IMAGE: "true"
+          PUBLISH_PHASE: publish
+          CANDIDATE_DIR: ${{ runner.temp }}/gtagod-candidate-${{ github.run_id }}-${{ github.run_attempt }}
           GTAGOD_COSIGN_KEY: env://GTAGOD_COSIGN_PRIVATE_KEY
           GTAGOD_COSIGN_PRIVATE_KEY: ${{ secrets.GTAGOD_COSIGN_PRIVATE_KEY }}
+          GTAGOD_COSIGN_PUBLIC_KEY: ${{ github.workspace }}/workspace/orchestration/cosign.pub
           COSIGN_PASSWORD: ${{ secrets.GTAGOD_COSIGN_PASSWORD }}
         run: |
           set +x

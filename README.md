@@ -19,15 +19,17 @@ GTACore is the only production data plane. Rollback may use only a previously si
 5. Push the workflow update. Push-triggered runs validate only and never publish.
 6. Review the validation run.
 7. For publication, set repository variable `DOCKER_PUBLISH_ENABLED=true` temporarily and manually dispatch the workflow with `publish=true`.
-8. The manual run must publish an immutable tag, generate SPDX SBOM and SLSA provenance attestations, sign the digest, and only then promote mutable aliases. Return `DOCKER_PUBLISH_ENABLED` to `false` immediately afterward.
-9. Production deployment must verify and use the immutable digest, never a mutable alias.
+8. Wait for that exact run and attempt to finish. On both success and failure, restore `DOCKER_PUBLISH_ENABLED=false` and read it back. Never cancel between immutable push and alias promotion.
+9. Independently verify the registry digest, Cosign signature, SPDX and SLSA v1 identities, and every promoted alias using the trusted public key. Do not disable TLS, claims, or transparency verification.
+10. Record the private source, Core and public workflow commits, run ID and attempt, immutable reference and verification results before declaring publication complete.
+11. Production deployment requires separate authorization and must use the signed, verified immutable digest, never a mutable alias.
 
 Publication additionally requires `GTAGOD_COSIGN_PRIVATE_KEY` and, when applicable, `GTAGOD_COSIGN_PASSWORD`. Source checkout, component checkout, registry, and signing credentials remain encrypted repository secrets and must never be printed.
 The corresponding public verification key is tracked as [`cosign.pub`](cosign.pub).
 
-## Orchestration dependency baseline
+## Active orchestration dependency baseline
 
-The 2026-10-23 refresh uses the available Ubuntu 26.04 hosted image, Buildx
+The active Rust workflow uses the available Ubuntu 26.04 hosted image, Buildx
 action v4.4.1, Cosign v3.1.4, SBOM action v0.24.3 and Syft v1.55.0.
 Checkout v7.0.1, Cosign installer v4.1.2 and cargo-deny 0.20.2 were already
 the latest stable releases at that check. Actions remain pinned to their full
@@ -36,12 +38,30 @@ commit IDs, not moving version aliases.
 Rust-based host tooling is explicitly built with Rust 1.99.1, and the workflow
 verifies the selected compiler instead of inheriting the runner's default.
 
+Publisher v2 separates credential-free build/validation from the conditional
+publication step. Only publication receives registry and signing credentials.
+It requires Rust dependency inventory in the SBOM, a blocking High/Critical
+image scan, authenticated evidence before digest-based alias promotion, and
+monotonic release versions. The global publication concurrency group is never
+cancelled in progress.
+
+The workflow pins product source
+`bd974844dba3b339a09566063c9084c63622bbdf` and Core
+`7034f53d6a5324bf2d882a3e00a17abf34eca9fa` (0.0.13). All four required
+private release gates passed for that exact product commit before advancing
+these pins. Public validation, signed publication and server deployment remain
+separate milestones; the pin update alone does not publish or deploy.
+
 These tooling updates alone do not advance the private source or component pins,
 prove private CI acceptance, publish an image, or authorize deployment.
 Dependency updates in private source still follow the sequence above.
 
 ## Supplied binary policy
 
-The supplied-GTACore workflow is validation-only. It checks out the exact private GTAGod and GTACore revisions, verifies the supplied binary against the private component lock, packages it deterministically, builds the external-daemon image, and runs the artifact runtime smoke tests.
+The supplied-artifact and SB comparison lanes are retired. Their active workflow
+files reject manual execution explicitly and receive no checkout, registry or
+signing credentials. Historical orchestration, including the previous tooling
+refresh, is retained under [`.github/archived-workflows`](.github/archived-workflows)
+for reference only; those files are not runnable GitHub workflows.
 
 The locked supplied binary is a historical validation input, not the current source-built release. It has no signed build attestation binding its dependency and sidecar inputs; a clean source lock alone does not prove those binary inputs. The image remains labeled `blocked-unattested-artifact`. The workflow has no registry login or publication step and must never publish or promote this candidate to `latest`.
