@@ -29,16 +29,17 @@ The corresponding public verification key is tracked as [`cosign.pub`](cosign.pu
 
 ## Latest verified image
 
-Version **0.0.13** was built from the pinned source by the official workflow and
-published in [run 41568857703, attempt 1](https://github.com/GTAStudio/GTA-God/actions/runs/41568857703).
+Version **0.0.16** was built from the pinned source by the official workflow and
+published in [run 43847772712, attempt 1](https://github.com/GTAStudio/GTA-God/actions/runs/43847772712),
+after [public validation 43844637684](https://github.com/GTAStudio/GTA-God/actions/runs/43844637684).
 The registry digest, signature, SPDX, exact SLSA v1 identities/materials and all
 three aliases were independently verified with the trusted public key.
 
 ```text
-docker.io/aizhihuxiao/gtagod@sha256:37242e835f2300c108f0e779ce2fb549a1a628473641058a3aaeb0e966a5eb5a
+docker.io/aizhihuxiao/gtagod@sha256:7388db46770f187fb52df6ded1d5e69035b95564d5789de11cd8eb661c4135fd
 ```
 
-`v0.0.13`, `gtacore-7034f53` and `latest` resolve to that digest.
+`v0.0.16`, `gtacore-26d0769` and `latest` resolve to that digest.
 `DOCKER_PUBLISH_ENABLED` was restored and read back as `false`.
 This is publication evidence, not a claim that any server was deployed.
 
