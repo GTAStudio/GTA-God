@@ -61,10 +61,11 @@ monotonic release versions. The global publication concurrency group is never
 cancelled in progress.
 
 The workflow pins product source
-`bd974844dba3b339a09566063c9084c63622bbdf` and Core
-`7034f53d6a5324bf2d882a3e00a17abf34eca9fa` (0.0.13). All four required
-private release gates passed for that exact product commit before advancing
-these pins. Public validation, signed publication and server deployment remain
+`f098d011025d208ad14437666c441b0ef9ed648a` and Core
+`26d0769f6973507add052627cfce5788c6c10a48` (0.0.16). All four required
+private release gates passed for that exact product commit in
+[run 43839947819, attempt 1](https://github.com/GTAStudio/GTA-God-Dev/actions/runs/43839947819)
+before advancing these pins. Public validation, signed publication and server deployment remain
 separate milestones; the pin update alone does not publish or deploy.
 
 These tooling updates alone do not advance the private source or component pins,
