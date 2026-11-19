@@ -29,17 +29,17 @@ The corresponding public verification key is tracked as [`cosign.pub`](cosign.pu
 
 ## Latest verified image
 
-Version **0.0.16** was built from the pinned source by the official workflow and
-published in [run 43847772712, attempt 1](https://github.com/GTAStudio/GTA-God/actions/runs/43847772712),
-after [public validation 43844637684](https://github.com/GTAStudio/GTA-God/actions/runs/43844637684).
+Version **0.0.17** was built from the pinned source by the official workflow and
+published in [run 44526694915, attempt 1](https://github.com/GTAStudio/GTA-God/actions/runs/44526694915),
+after [public validation 44524117342](https://github.com/GTAStudio/GTA-God/actions/runs/44524117342).
 The registry digest, signature, SPDX, exact SLSA v1 identities/materials and all
 three aliases were independently verified with the trusted public key.
 
 ```text
-docker.io/aizhihuxiao/gtagod@sha256:7388db46770f187fb52df6ded1d5e69035b95564d5789de11cd8eb661c4135fd
+docker.io/aizhihuxiao/gtagod@sha256:b61f945878b4e66f706a9e45b612f0a8c49ffe988940b1479100a67eb78addea
 ```
 
-`v0.0.16`, `gtacore-26d0769` and `latest` resolve to that digest.
+`v0.0.17`, `gtacore-eb86199` and `latest` resolve to that digest.
 `DOCKER_PUBLISH_ENABLED` was restored and read back as `false`.
 This is publication evidence, not a claim that any server was deployed.
 
@@ -51,7 +51,7 @@ Checkout v7.0.1, Cosign installer v4.1.2 and cargo-deny 0.20.2 were already
 the latest stable releases at that check. Actions remain pinned to their full
 commit IDs, not moving version aliases.
 
-Rust-based host tooling is explicitly built with Rust 1.99.1, and the workflow
+Rust-based host tooling is explicitly built with Rust 1.100.0, and the workflow
 verifies the selected compiler instead of inheriting the runner's default.
 
 Publisher v2 separates credential-free build/validation from the conditional
@@ -62,10 +62,10 @@ monotonic release versions. The global publication concurrency group is never
 cancelled in progress.
 
 The workflow pins product source
-`f098d011025d208ad14437666c441b0ef9ed648a` and Core
-`26d0769f6973507add052627cfce5788c6c10a48` (0.0.16). All four required
+`fa555e924fb14e38afa75a13cadc48e1b91b2f53` and Core
+`eb8619902d428efc77e049e2222d76d044ddbd5b` (0.0.17). All four required
 private release gates passed for that exact product commit in
-[run 43839947819, attempt 1](https://github.com/GTAStudio/GTA-God-Dev/actions/runs/43839947819)
+[run 44519225651, attempt 1](https://github.com/GTAStudio/GTA-God-Dev/actions/runs/44519225651)
 before advancing these pins. Public validation, signed publication and server deployment remain
 separate milestones; the pin update alone does not publish or deploy.
 
