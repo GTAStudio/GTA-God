@@ -1,6 +1,6 @@
 # Public orchestration only. Product source and build credentials remain private.
-# Release source: GTA-God-Dev fa555e924fb14e38afa75a13cadc48e1b91b2f53
-# GTACore-Rust: eb8619902d428efc77e049e2222d76d044ddbd5b (0.0.17)
+# Release source: GTA-God-Dev cbb43c692ee3a5476311eda5d25f3e929e5bf07b
+# GTACore-Rust: 68dec3a39b26c95f1feb0f599cf2525d2f3ce9f4 (0.0.18)
 name: Validate or Publish Rust Image
 
 on:
@@ -8,6 +8,7 @@ on:
     branches: [main]
     paths:
       - .github/workflows/docker-build-rust.yml
+      - cosign.pub
   workflow_dispatch:
     inputs:
       publish:
@@ -27,8 +28,8 @@ permissions:
 env:
   DOCKER_BUILD_RECORD_UPLOAD: "false"
   RUSTUP_TOOLCHAIN: "1.100.0"
-  PRODUCT_REVISION: fa555e924fb14e38afa75a13cadc48e1b91b2f53
-  CORE_REVISION: eb8619902d428efc77e049e2222d76d044ddbd5b
+  PRODUCT_REVISION: cbb43c692ee3a5476311eda5d25f3e929e5bf07b
+  CORE_REVISION: 68dec3a39b26c95f1feb0f599cf2525d2f3ce9f4
 
 jobs:
   build:
