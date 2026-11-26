@@ -48,11 +48,11 @@ This is publication evidence, not a claim that any server was deployed.
 
 ## Active orchestration dependency baseline
 
-The active Rust workflow uses the available Ubuntu 26.04 hosted image, Buildx
-action v4.4.1, Cosign v3.1.4, SBOM action v0.24.3 and Syft v1.55.0.
-Checkout v7.0.1, Cosign installer v4.1.2 and cargo-deny 0.20.2 were already
-the latest stable releases at that check. Actions remain pinned to their full
-commit IDs, not moving version aliases.
+The active Rust workflow uses the available Ubuntu 26.04 hosted image, Checkout
+v7.0.1, Buildx action v4.4.1, Cosign installer v4.1.4, Cosign v3.1.6, SBOM
+action v0.24.4, Syft v1.57.2, cargo-deny 0.22.1, cargo-audit 0.23.0, Trivy
+0.76.2 and cargo-auditable 0.7.8. Actions remain pinned to their full commit
+IDs, not moving version aliases.
 
 Rust-based host tooling is explicitly built with Rust 1.100.0, and the workflow
 verifies the selected compiler instead of inheriting the runner's default.
@@ -65,10 +65,10 @@ monotonic release versions. The global publication concurrency group is never
 cancelled in progress.
 
 The workflow pins product source
-`3e3f8cc929dd6c41d9d9f4d34ea593bdc156d8df` and Core
+`c0665417fe8fa6c2aed5fd071fc84586ff2b60c3` and Core
 `974e2e27beb08394a10faf1586ee3c77f74cb16c` (0.0.21). All four required
 private release gates passed for that exact product commit in
-[run 45746784240, attempt 1](https://github.com/GTAStudio/GTA-God-Dev/actions/runs/45746784240)
+[run 45759238197, attempt 1](https://github.com/GTAStudio/GTA-God-Dev/actions/runs/45759238197)
 before advancing these pins. Public validation, signed publication and server deployment remain
 separate milestones; the pin update alone does not publish or deploy.
 
