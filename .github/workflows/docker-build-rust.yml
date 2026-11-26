@@ -1,6 +1,6 @@
 # Public orchestration only. Product source and build credentials remain private.
-# Release source: GTA-God-Dev e79056ce20ffefb9fb6e7a1ec93d98ec48c3ad0b
-# GTACore-Rust: e3cb9f9a623640164b88e1ce0aad08a96c9c4a87 (0.0.20)
+# Release source: GTA-God-Dev 3e3f8cc929dd6c41d9d9f4d34ea593bdc156d8df
+# GTACore-Rust: 974e2e27beb08394a10faf1586ee3c77f74cb16c (0.0.21)
 name: Validate or Publish Rust Image
 
 on:
@@ -28,8 +28,8 @@ permissions:
 env:
   DOCKER_BUILD_RECORD_UPLOAD: "false"
   RUSTUP_TOOLCHAIN: "1.100.0"
-  PRODUCT_REVISION: e79056ce20ffefb9fb6e7a1ec93d98ec48c3ad0b
-  CORE_REVISION: e3cb9f9a623640164b88e1ce0aad08a96c9c4a87
+  PRODUCT_REVISION: 3e3f8cc929dd6c41d9d9f4d34ea593bdc156d8df
+  CORE_REVISION: 974e2e27beb08394a10faf1586ee3c77f74cb16c
 
 jobs:
   build:
